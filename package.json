@@ -1,0 +1,44 @@
+{
+	"name": "discord-api-proxy",
+	"version": "0.0.1",
+	"type": "module",
+	"description": "Discord API proxy deployed as a Cloudflare Worker",
+	"author": "Synertry <60792595+Synertry@users.noreply.github.com>",
+	"license": "BSL-1.0",
+	"private": true,
+	"homepage": "https://github.com/Synertry/discord-api-proxy",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Synertry/discord-api-proxy.git"
+	},
+	"bugs": {
+		"url": "https://github.com/Synertry/discord-api-proxy/issues"
+	},
+	"keywords": [
+		"discord",
+		"api",
+		"proxy",
+		"cloudflare-workers",
+		"hono"
+	],
+	"scripts": {
+		"postinstall": "bun run cf-typegen",
+		"lint": "tsc --noEmit",
+		"test": "vitest",
+		"dev": "wrangler dev",
+		"cf-typegen": "wrangler types --env-interface CloudflareBindings"
+	},
+	"dependencies": {
+		"@hono/swagger-ui": "^0.6.1",
+		"@hono/zod-openapi": "^1.2.3",
+		"hono": "^4.12.9",
+		"yaml": "^2.8.3"
+	},
+	"devDependencies": {
+		"@cloudflare/vitest-pool-workers": "^0.13.4",
+		"@types/node": "^25.5.0",
+		"typescript": "^5.9.3",
+		"vitest": "^4.1.1",
+		"wrangler": "^4.77.0"
+	}
+}

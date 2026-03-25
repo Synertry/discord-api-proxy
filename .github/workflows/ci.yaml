@@ -1,0 +1,129 @@
+# Run intensive tests and analysis
+name: CI
+
+on:
+    push:
+        branches:
+          - main
+
+# Serialize runs to prevent git push race conditions
+concurrency:
+    group: full-cicd
+    cancel-in-progress: false
+
+jobs:
+    precheck: # Skip CI if only a doc file or .md file or the LICENSE has been changed, but mark as successful so PR succeeds to protected main branch. Huge bloat logic, because GitHub does not support exceptions, in that case.
+        name: Precheck
+        runs-on: ubuntu-latest
+        outputs:
+            doc_only: ${{ steps.diff_check.outputs.doc_only }}
+            is_dependabot: ${{ steps.detect_dependabot.outputs.is_dependabot }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6.0.2
+              with:
+                fetch-depth: 2 # fetch last two commits to compare
+
+            - name: Check diff
+              id: diff_check
+              run: |
+                # Diff HEAD with the previous commit
+                diff=$(git diff --name-only HEAD^ HEAD)
+
+                # Get count of changed doc files
+                docs_change_count=$(echo "$diff" | grep -E -e "\.md$" -e "LICENSE$" -e "CODEOWNERS$" | wc -l)
+
+                # Evaluate if only docs were changed
+                # Check that "$diff" is non-empty (-n returns true if the string length is non-zero)
+                # and that "$docs_change_count" equals the number of lines in "$diff" (echo "$diff" | wc -l).
+
+                # If both conditions are true, all detected changes are documentation-only.
+                if [ -n "$diff" ] && [ "$docs_change_count" -eq "$(echo "$diff" | wc -l)" ]; then
+                    echo "doc_only=true" >> $GITHUB_OUTPUT
+                else
+                    echo "doc_only=false" >> $GITHUB_OUTPUT
+                fi
+
+            - name: Verify Dependabot signatures
+              id: detect_dependabot
+              env:
+                COMMIT_MSG: ${{ github.event.head_commit.message }}
+              run: |
+                LINE_SIGNED="Signed-off-by: dependabot[bot] <support@github.com>"
+                LINE_COAUTHORED="Co-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>"
+
+                # -qFx for exact line matches, -qF for substring match
+                if echo "$COMMIT_MSG" | grep -qFx "$LINE_SIGNED" && \
+                  echo "$COMMIT_MSG" | grep -qFx "$LINE_COAUTHORED" && \
+                  echo "$COMMIT_MSG" | grep -qF "Bump"; then
+                  echo "Strict Dependabot signature and Bump keyword matched."
+                  echo "is_dependabot=true" >> "$GITHUB_OUTPUT"
+                else
+                  echo "Signature or keyword match failed."
+                  echo "is_dependabot=false" >> "$GITHUB_OUTPUT"
+                fi
+
+    lint:
+        name: Lint
+        needs: precheck
+        if: needs.precheck.outputs.doc_only != 'true' && needs.precheck.outputs.is_dependabot != 'true'
+        uses: ./.github/workflows/lint.yaml
+
+    test:
+        name: Test
+        needs: lint
+        uses: ./.github/workflows/test.yaml
+
+    # review: # Steps to review the code # TODO: Evaluate if this is needed
+    #     name: Review
+    #     runs-on: ubuntu-latest
+    #     needs: test
+
+
+    integrate:
+      name: Integrate to production
+      runs-on: ubuntu-latest
+      permissions:
+        contents: write
+        pull-requests: write
+      needs:
+        - precheck
+        - test
+      if: ${{ always() && contains(needs.*.result, 'success') && !(contains(needs.*.result, 'failure')) }}
+      env:
+        GH_TOKEN: ${{ secrets.PAT }}
+      steps:
+        - name: Checkout code
+          uses: actions/checkout@v6.0.2
+          with:
+            fetch-depth: 0 # We need this if dependabot pushes multiple bumps at once # TODO: Gateway this later
+            token: ${{ secrets.PAT }} # Use PAT so that the push to production triggers deploy.yaml (GITHUB_TOKEN pushes do not trigger workflows)
+
+        - name: Create Pull Request
+          if: ${{ needs.precheck.outputs.is_dependabot != 'true' }}
+          run: |
+            # Explicitly fetch the target branch required for the --fill diff calculation
+            git fetch origin production
+
+            # 1. Check if a PR already exists to avoid errors
+            # Returns the count of open PRs from main -> production
+            existing_pr=$(gh pr list --base production --head main --state open --json number --jq length)
+
+            if [ "$existing_pr" -gt 0 ]; then
+              echo "PR already exists. Skipping creation."
+            else
+              echo "Creating PR from main to production..."
+              gh pr create \
+                --base production \
+                --head main \
+                --fill \
+                --label "workflow/auto-pr"
+            fi
+
+        # Commit directly to production if it is a Dependabot PR
+        - name: Commit to production
+          if: ${{ needs.precheck.outputs.is_dependabot == 'true' }}
+          run: |
+            echo "🤖 Dependabot Bump. Pushing to production..."
+            # Push the currently checked-out commit (main) directly to production
+            git push origin HEAD:refs/heads/production

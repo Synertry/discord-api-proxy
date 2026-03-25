@@ -1,0 +1,68 @@
+# To get started with Dependabot version updates, you'll need to specify which
+# package ecosystems to update and where the package manifests are located.
+# Please see the documentation for all configuration options:
+# https://docs.github.com/github/administering-a-repository/configuration-options-for-dependency-updates
+
+version: 2
+updates:
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: daily
+      time: '19:00'
+      timezone: Europe/Berlin
+    # Raise pull requests for version updates
+    # to bun against the `main` branch
+    target-branch: 'main'
+    # Disable rebasing pull requests
+    rebase-strategy: 'auto'
+    # Allow up to 10 open pull requests
+    open-pull-requests-limit: 10
+    # Labels on pull requests for version updates only
+    labels:
+      - 'workflow/dependabot'
+      - 'workflow/auto-pr'
+      - 'area/deps'
+    assignees:
+      - Synertry
+    commit-message:
+      prefix: 'chore'
+      include: 'scope'
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"
+    ignore:
+      - dependency-name: "vitest"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "vitest-coverage"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+      time: '19:00'
+      timezone: Europe/Berlin
+    target-branch: 'main'
+    rebase-strategy: 'auto'
+    open-pull-requests-limit: 10
+    labels:
+      - 'workflow/dependabot'
+      - 'workflow/auto-pr'
+      - 'area/CI'
+    assignees:
+      - Synertry
+    commit-message:
+      prefix: 'chore'
+      include: 'scope'
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"

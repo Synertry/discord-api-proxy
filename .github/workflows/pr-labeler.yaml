@@ -1,0 +1,38 @@
+name: PR Labeler
+
+on:
+  pull_request:
+    branches:
+      - production
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  triage:
+    name: Triage PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@v6.0.1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          configuration-path: .github/labels.yaml
+          sync-labels: true
+
+  size-labeler:
+    name: Label the PR size
+    runs-on: ubuntu-latest
+    needs: triage
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6.0.2
+      - name: Label PR based on size
+        uses: cbrgm/pr-size-labeler-action@v1.3.5
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }} # Pass the GitHub token for authentication
+          github_repository: ${{ github.repository }} # Pass the repository name
+          github_pr_number: ${{ github.event.number }} # Pass the pull request number
+          config_file_path: '.github/pull-request-size.yaml' # Specify the path to the configuration file
+          github_enterprise_url: '' # Optional: GitHub Enterprise URL (e.g., https://github.mycompany.com)

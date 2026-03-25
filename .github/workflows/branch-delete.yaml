@@ -1,0 +1,40 @@
+# GitHub does support deletion of merged PRs, but it does not have an exclude filter for the main branch, which would be fatal.
+name: Delete Merged Branch
+
+on:
+  pull_request:
+    types:
+      - closed
+
+permissions:
+  contents: write # Required to delete the branch ref
+
+jobs:
+  delete-branch:
+    name: Delete merged PR branch
+    runs-on: ubuntu-latest
+    # Only run if the PR was actually merged (not just closed)
+    if: github.event.pull_request.merged == true
+    steps:
+      - name: Delete Branch Safely
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          # 🛡️ Safety Configuration
+          # Add any branch names here that should NEVER be auto-deleted
+          PROTECTED_BRANCHES=("main" "production")
+
+          # Check if the branch is protected
+          if [[ " ${PROTECTED_BRANCHES[*]} " =~ " ${HEAD_REF} " ]]; then
+            echo "🛡️ Protected branch '${HEAD_REF}' detected. Skipping deletion."
+            exit 0
+          fi
+
+          echo "🗑️ Deleting merged branch '${HEAD_REF}'..."
+
+          # 🚀 Native API Call (No git checkout needed)
+          # We use || true to prevent failure if the branch was already deleted by another process
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${HEAD_REF}" || true
+
+          echo "✅ Branch deleted"

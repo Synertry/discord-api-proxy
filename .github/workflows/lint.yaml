@@ -1,0 +1,54 @@
+name: Lint
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        required: false
+        type: string
+        description: "Git ref to checkout (optional, defaults to current commit)"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2.1.2
+        with:
+          bun-version: latest
+
+      - name: Restore bun cache and node_modules
+        id: cache
+        uses: actions/cache/restore@v5.0.3
+        with:
+          path: |
+            ~/.cache/bun
+            node_modules
+          key: cache-${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bun install
+
+      - name: Save bun cache and node_modules
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5.0.3
+        with:
+          path: |
+            ~/.cache/bun
+            node_modules
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Generate Cloudflare Worker types
+        run: bun run cf-typegen
+
+      - name: Type Check & Lint
+        run: bun run lint

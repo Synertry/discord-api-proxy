@@ -1,0 +1,99 @@
+# Config Files
+'area/config':
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.gitignore'
+          - '.editorconfig'
+          - '.prettier*'
+          - '.gitattributes'
+          - 'wrangler.jsonc'
+          - 'tsconfig.json'
+          - 'vitest.config.mts'
+
+# IDEs and editors
+'area/IDE':
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.vscode/**/*'
+          - '.idea/**/*'
+
+# GitHub Workflows
+'area/CI':
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/CODEOWNERS'
+          - '.github/workflows/**/*.yaml'
+          - '.github/dependabot.yaml'
+          - '.github/labels.yaml'
+          - '.github/pull-request-size.yaml'
+
+# Dependencies
+'area/deps':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'package.json'
+          - 'bun.lock'
+
+# Source Code
+'area/source':
+  - changed-files:
+      - all-globs-to-any-file:
+          - 'src/**/*'
+          - '!**/README.md'
+
+# Tests
+'area/tests':
+  - changed-files:
+      - all-globs-to-any-file:
+          - 'test/**/*'
+          - '!**/README.md'
+
+# Documentation
+'area/docs':
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/README.md'
+          - '**/CONTRIBUTING.md'
+          - '**/CODE_OF_CONDUCT.md'
+
+# License
+'area/license':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'LICENSE'
+
+
+# Labels based on commit messages
+
+'type/build': # Changes that affect the build system or external dependencies
+  - head-branch: '^build'
+
+'type/chore': # Any maintenance task change that doesn't modify source or test files, e.g. bumping dependencies or updating configs
+  - head-branch: '^chore'
+
+'type/ci': # Changes to the CI configuration files and scripts
+  - head-branch: '^ci'
+
+'type/docs': # Documentation changes
+  - head-branch: '^docs'
+
+'type/feat': # A new feature
+  - head-branch: '^feat'
+
+'type/fix': # A bug fix
+  - head-branch: '^fix'
+
+'type/perf': # A code change that improves performance
+  - head-branch: '^perf'
+
+'type/refactor': # A code change that neither fixes a bug nor adds a feature but makes the code structure better
+  - head-branch: '^refactor'
+
+'type/revert': # Reverts a previous commit
+  - head-branch: '^revert'
+
+'type/style': # Changes that do not affect the meaning of the code (white-space, formatting, .etc)
+  - head-branch: '^style'
+
+'type/test': # Adding missing tests or correcting existing tests
+  - head-branch: '^test'

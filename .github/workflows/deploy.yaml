@@ -1,0 +1,117 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches:
+      - production
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2.1.2
+        with:
+          bun-version: latest
+
+      - name: Restore bun cache and node_modules
+        id: cache
+        uses: actions/cache/restore@v5.0.3
+        with:
+          path: |
+            ~/.cache/bun
+            node_modules
+          key: cache-${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bun install
+
+      - name: Save bun cache and node_modules
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5.0.3
+        with:
+          path: |
+            ~/.cache/bun
+            node_modules
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Generate Cloudflare Worker types
+        run: bun run cf-typegen
+
+      - name: Inject custom domain
+        run: |
+          if [ -z "${{ secrets.CUSTOM_DOMAIN }}" ]; then
+            echo "::error::CUSTOM_DOMAIN secret is not set"
+            exit 1
+          fi
+
+          sed -i \
+            -e "s/__CUSTOM_DOMAIN__/${{ secrets.CUSTOM_DOMAIN }}/g" \
+            wrangler.jsonc
+
+      - name: Set Build Metadata
+        run: |
+          sed -i \
+            -e "s/__BUILD_HASH__/${{ github.sha }}/g" \
+            -e "s/__BUILD_TIMESTAMP__/${{ github.event.head_commit.timestamp }}/g" \
+            wrangler.jsonc
+
+      - name: Deploy to Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -e
+          set -o pipefail
+
+          # --- 1. PREPARE METADATA ---
+          # Get Short SHA (First 8 chars)
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
+
+          # Try to get the Git Commit Title (Subject only)
+          # We use || true to prevent crash if git fails
+          COMMIT_TITLE=$(git log -1 --format=%s 2>/dev/null || echo "")
+
+          # Fallback if empty (e.g. manual trigger or no checkout)
+          if [ -z "$COMMIT_TITLE" ]; then
+            COMMIT_TITLE="Manual Deploy"
+          fi
+
+          # Sanitize: Remove quotes and backticks to prevent syntax errors
+          SAFE_TITLE=$(echo "$COMMIT_TITLE" | sed "s/[\"'\`]//g")
+
+          # Truncate to 50 chars (Max Limit)
+          # We use Bash native substring ${var:offset:length} which handles UTF-8 better than cut
+          DEPLOY_MSG="${SAFE_TITLE:0:50}"
+
+          echo "📝 Message: $DEPLOY_MSG"
+          echo "🔖 Tag: $SHORT_SHA"
+
+          # --- 2. UPLOAD ---
+          echo "🚀 Uploading..."
+          bun run wrangler versions upload \
+            --message "$DEPLOY_MSG" \
+            --tag "$SHORT_SHA"
+
+          # --- 3. RETRIEVE ID ---
+          echo "🔍 verifying upload..."
+          # Filter specifically by our tag
+          VERSION_ID=$(bun run wrangler versions list --json | jq -r --arg tag "$SHORT_SHA" '.[] | select(.annotations["workers/tag"] == $tag) | .id')
+
+          if [ -z "$VERSION_ID" ] || [ "$VERSION_ID" == "null" ]; then
+            echo "::error::Version ID not found for tag $SHORT_SHA"
+            exit 1
+          fi
+
+          echo "✅ Found Version ID: $VERSION_ID"
+
+          # --- 4. PROMOTE ---
+          echo "🚢 Promoting to live..."
+          bun run wrangler versions deploy "$VERSION_ID" \
+            --message "$DEPLOY_MSG" \
+            --yes

@@ -1,0 +1,28 @@
+name: First interaction
+
+on:
+  issues:
+    types: [opened]
+  pull_request:
+    branches: [main]
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  check_for_first_interaction:
+    name: Greet First-Time Contributors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/first-interaction@v3.1.0
+        with:
+          issue_message: |
+            Hello @${{ github.actor }}! Thank you for filing an issue.
+            If this is a bug report, please include relevant logs to help us debug the problem.
+          pr_message: |
+            Hello @${{ github.actor }}! Thank you for your contribution.
+
+            If you are fixing a bug, please reference the issue number in the description.
+            If you are implementing a feature request, please check with the maintainers that the feature will be accepted first.

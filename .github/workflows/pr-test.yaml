@@ -1,0 +1,58 @@
+# Lightweight testing of PRs before it hits the intensive workflow on main
+name: PR Test
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+      - '.github/CODEOWNERS'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    uses: ./.github/workflows/lint.yaml
+    with:
+      ref: ${{ github.head_ref }}
+
+  test:
+    uses: ./.github/workflows/test.yaml
+    needs: lint
+    with:
+      ref: ${{ github.head_ref }}
+
+  label:
+    name: Grant Label
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      LABELS: status/pr-test-passed
+    steps:
+      # Adds label 'status/pr-test-passed' when previous steps passed
+      - name: Adds passed label
+        run: gh pr edit ${{ env.PR_NUMBER }} --add-label "${{ env.LABELS }}"
+
+  dependabot:
+    name: Dependabot auto-merge
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Enable auto-merge for Dependabot PRs
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.PAT }}

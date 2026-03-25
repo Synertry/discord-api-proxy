@@ -1,0 +1,91 @@
+# Commits the PR to production without creating a new commit hash
+name: Auto Fast-Forward Approval
+
+on:
+  pull_request_review:
+    types:
+        - submitted
+  pull_request:
+    types:
+        - labeled
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+        description: 'Target Pull Request Number (e.g., 42)'
+
+jobs:
+  merge:
+    name: Execute Fast-Forward Push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      target_sha: ${{ steps.validate.outputs.validated_sha }}
+    steps:
+      - name: Extract Review Event Data
+        id: review_data
+        if: github.event_name == 'pull_request_review' && github.event.review.state == 'approved'
+        run: |
+          echo "TARGET_SHA=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          echo "BASE_REF=${{ github.event.pull_request.base.ref }}" >> "$GITHUB_OUTPUT"
+          echo "HEAD_REF=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract Label Event Data
+        id: label_data
+        if: github.event_name == 'pull_request' && github.event.label.name == 'status/approved'
+        run: |
+          echo "TARGET_SHA=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          echo "BASE_REF=${{ github.event.pull_request.base.ref }}" >> "$GITHUB_OUTPUT"
+          echo "HEAD_REF=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract Manual Dispatch Data
+        id: dispatch_data
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUM="${{ inputs.pr_number }}"
+          # Fetch PR metadata via GitHub CLI and extract JSON values
+          PR_JSON=$(gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json headRefOid,baseRefName,headRefName)
+          echo "TARGET_SHA=$(echo "$PR_JSON" | jq -r '.headRefOid')" >> "$GITHUB_OUTPUT"
+          echo "BASE_REF=$(echo "$PR_JSON" | jq -r '.baseRefName')" >> "$GITHUB_OUTPUT"
+          echo "HEAD_REF=$(echo "$PR_JSON" | jq -r '.headRefName')" >> "$GITHUB_OUTPUT"
+
+      - name: Validate Branch Constraints
+        id: validate
+        env:
+          # Coalesce outputs: only the step that executed will return a value
+          TARGET_SHA: ${{ steps.review_data.outputs.TARGET_SHA || steps.label_data.outputs.TARGET_SHA || steps.dispatch_data.outputs.TARGET_SHA }}
+          BASE_REF: ${{ steps.review_data.outputs.BASE_REF || steps.label_data.outputs.BASE_REF || steps.dispatch_data.outputs.BASE_REF }}
+          HEAD_REF: ${{ steps.review_data.outputs.HEAD_REF || steps.label_data.outputs.HEAD_REF || steps.dispatch_data.outputs.HEAD_REF }}
+        run: |
+          if [ -z "$TARGET_SHA" ]; then
+            echo "Trigger condition not met. Halting execution."
+            exit 0
+          fi
+
+          if [ "$BASE_REF" != "production" ] || [ "$HEAD_REF" != "main" ]; then
+            echo "Invalid routing: $HEAD_REF -> $BASE_REF. Must be main -> production. Halting."
+            exit 0
+          fi
+
+          echo "validated_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        if: steps.validate.outputs.validated_sha != ''
+        uses: actions/checkout@v6.0.2
+        with:
+          # A full clone is required to ensure the local runner has the correct references to push
+          fetch-depth: 0
+          token: ${{ secrets.PAT }}  # PAT required — GITHUB_TOKEN pushes don't trigger workflows
+
+      - name: Fast-forward production branch
+        if: steps.validate.outputs.validated_sha != ''
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          # Push the exact commit SHA of the approved PR head directly to the production reference
+          git push origin ${{ steps.validate.outputs.validated_sha }}:refs/heads/production
