@@ -9,6 +9,7 @@
           - 'wrangler.jsonc'
           - 'tsconfig.json'
           - 'vitest.config.mts'
+          - '.dev.vars.example'
 
 # IDEs and editors
 'area/IDE':

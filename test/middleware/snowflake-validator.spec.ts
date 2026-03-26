@@ -60,6 +60,11 @@ describe('Snowflake Validator Middleware', () => {
     });
   });
 
+  it('should allow @original for messages (interaction response references)', async () => {
+    const res = await app.request('http://localhost/webhooks/12345678901234567/token/messages/@original');
+    expect(res.status).toBe(200);
+  });
+
   it('should reject non-numeric strings', async () => {
     const res = await app.request('http://localhost/channels/abc/messages/123');
     expect(res.status).toBe(400);
