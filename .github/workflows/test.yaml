@@ -21,13 +21,13 @@ jobs:
           ref: ${{ inputs.ref }}
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2.1.2
+        uses: oven-sh/setup-bun@v2.2.0
         with:
           bun-version: latest
 
       - name: Restore bun cache and node_modules
         id: cache
-        uses: actions/cache/restore@v5.0.3
+        uses: actions/cache/restore@v5.0.4
         with:
           path: |
             ~/.cache/bun
@@ -40,7 +40,7 @@ jobs:
 
       - name: Save bun cache and node_modules
         if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5.0.3
+        uses: actions/cache/save@v5.0.4
         with:
           path: |
             ~/.cache/bun
