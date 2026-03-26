@@ -120,4 +120,37 @@ describe('Proxy Route & Introspection (Integration)', () => {
       retryAfter: 1.5,
     });
   });
+
+  it('should preserve Retry-After and X-RateLimit-* headers on 429', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response('Rate limited', {
+        status: 429,
+        headers: {
+          'Retry-After': '2.0',
+          'X-RateLimit-Limit': '5',
+          'X-RateLimit-Remaining': '0',
+          'X-RateLimit-Reset-After': '2.0',
+        },
+      }),
+    );
+    const app = createApp(mockFetch as unknown as typeof fetch);
+
+    const MOCK_ENV: Bindings = {
+      AUTH_KEY: 'secret-key',
+      DISCORD_TOKEN_BOT: 'bot-token',
+      DISCORD_TOKEN_USER: 'user-token',
+    };
+
+    const req = new Request('http://localhost/users/@me', {
+      method: 'GET',
+      headers: { 'x-auth-key': 'secret-key' },
+    });
+
+    const res = await app.request(req, undefined, MOCK_ENV);
+    expect(res.status).toBe(429);
+    expect(res.headers.get('Retry-After')).toBe('2.0');
+    expect(res.headers.get('X-RateLimit-Limit')).toBe('5');
+    expect(res.headers.get('X-RateLimit-Remaining')).toBe('0');
+    expect(res.headers.get('X-RateLimit-Reset-After')).toBe('2.0');
+  });
 });

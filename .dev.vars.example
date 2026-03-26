@@ -1,0 +1,8 @@
+# Discord bot token — used for most API calls (prefixed with "Bot " automatically)
+DISCORD_TOKEN_BOT=
+
+# Discord user token — used for endpoints requiring user-level auth (e.g. guild fetches)
+DISCORD_TOKEN_USER=
+
+# Shared secret for authenticating incoming requests to this proxy
+AUTH_KEY=
