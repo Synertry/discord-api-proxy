@@ -15,8 +15,9 @@
  * accidental markdown injection from user-controlled data.
  *
  * The formatted message shows the **top 3** entries per ranked category (regardless
- * of how many the API returned), and up to **5** entries per listing section with
- * `and N more...` truncation. Invalid submissions are intentionally excluded.
+ * of how many the API returned), and up to **5** entries per listing section (or **10**
+ * for multi-mention and different-format submissions) with `and N more...` truncation.
+ * Invalid submissions are intentionally excluded.
  */
 
 import type { KindnessCascadeResult, SubmissionEntry, UserTally } from './types';
@@ -24,8 +25,11 @@ import type { KindnessCascadeResult, SubmissionEntry, UserTally } from './types'
 /** Maximum number of ranked entries shown in the formatted output. */
 const TOP_RANKED = 3;
 
-/** Maximum number of listing entries shown before truncation. */
+/** Default maximum number of listing entries shown before truncation. */
 const MAX_LISTING_SHOWN = 5;
+
+/** Higher limit for categories that tend to have more entries. */
+const MAX_LISTING_SHOWN_EXTENDED = 10;
 
 /**
  * Escapes characters that have special meaning in Discord markdown.
@@ -62,16 +66,16 @@ function formatUserTallyRanked(entries: readonly UserTally[]): string {
  * @param entries - All entries in this listing category.
  * @returns Formatted section string, or empty string if no entries exist.
  */
-function formatListingSection(title: string, entries: readonly SubmissionEntry[]): string {
+function formatListingSection(title: string, entries: readonly SubmissionEntry[], maxShown: number = MAX_LISTING_SHOWN): string {
   if (entries.length === 0) return '';
 
   const lines = [`### ${title}`];
-  const shown = entries.slice(0, MAX_LISTING_SHOWN);
+  const shown = entries.slice(0, maxShown);
   for (const entry of shown) {
     lines.push(`- ${entry.messageLink}`);
   }
-  if (entries.length > MAX_LISTING_SHOWN) {
-    lines.push(`and ${entries.length - MAX_LISTING_SHOWN} more...`);
+  if (entries.length > maxShown) {
+    lines.push(`and ${entries.length - maxShown} more...`);
   }
 
   return lines.join('\n');
@@ -92,18 +96,22 @@ export function formatDiscordMessage(result: KindnessCascadeResult, timestamp: n
 
   sections.push('**__Kindness Cascade Tally__**');
 
-  // Ranked sections — always show top 3 regardless of how many the API returned
-  sections.push(`### Top Voted Kindness\n${formatSubmissionRanked(result.ranked.topVotedKindness.slice(0, TOP_RANKED))}`);
-  sections.push(`### Most Kindness Sent\n${formatUserTallyRanked(result.ranked.mostKindnessSent.slice(0, TOP_RANKED))}`);
-  sections.push(`### Most Kindness Received\n${formatUserTallyRanked(result.ranked.mostKindnessReceived.slice(0, TOP_RANKED))}`);
-  sections.push(`### Top Voted Submitter\n${formatUserTallyRanked(result.ranked.topVotedSubmitter.slice(0, TOP_RANKED))}`);
-  sections.push(`### Top Voted Receiver\n${formatUserTallyRanked(result.ranked.topVotedReceiver.slice(0, TOP_RANKED))}`);
+  // Ranked sections — always show top 3 regardless of how many the API returned.
+  // Joined with double newlines (single blank line) to keep them visually grouped.
+  const rankedSections = [
+    `### Top Voted Kindness\n${formatSubmissionRanked(result.ranked.topVotedKindness.slice(0, TOP_RANKED))}`,
+    `### Most Kindness Sent\n${formatUserTallyRanked(result.ranked.mostKindnessSent.slice(0, TOP_RANKED))}`,
+    `### Most Kindness Received\n${formatUserTallyRanked(result.ranked.mostKindnessReceived.slice(0, TOP_RANKED))}`,
+    `### Top Voted Submitter\n${formatUserTallyRanked(result.ranked.topVotedSubmitter.slice(0, TOP_RANKED))}`,
+    `### Top Voted Receiver\n${formatUserTallyRanked(result.ranked.topVotedReceiver.slice(0, TOP_RANKED))}`,
+  ].join('\n\n');
+  sections.push(rankedSections);
 
   // Listing sections — skip empty categories, exclude invalidSubmissions
   const listingSections = [
     formatListingSection('Reply Submissions', result.listings.replySubmissions),
-    formatListingSection('Multi Mention Submissions', result.listings.multiMentionSubmissions),
-    formatListingSection('Different Format Submissions', result.listings.differentFormatSubmissions),
+    formatListingSection('Multi Mention Submissions', result.listings.multiMentionSubmissions, MAX_LISTING_SHOWN_EXTENDED),
+    formatListingSection('Different Format Submissions', result.listings.differentFormatSubmissions, MAX_LISTING_SHOWN_EXTENDED),
     formatListingSection('Missing Votes', result.listings.missingVotes),
   ].filter((s) => s.length > 0);
 
