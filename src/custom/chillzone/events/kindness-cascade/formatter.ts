@@ -15,21 +15,18 @@
  * accidental markdown injection from user-controlled data.
  *
  * The formatted message shows the **top 3** entries per ranked category (regardless
- * of how many the API returned), and up to **5** entries per listing section (or **10**
- * for multi-mention and different-format submissions) with `and N more...` truncation.
- * Invalid submissions are intentionally excluded.
+ * of how many the API returned), and up to **5** entries per listing section with
+ * `and N more...` truncation. When `showAll` is enabled, listing sections are not
+ * truncated. Invalid submissions are intentionally excluded.
  */
 
-import type { KindnessCascadeResult, SubmissionEntry, UserTally } from './types';
+import type { KindnessCascadeResult, Stats, SubmissionEntry, UserTally } from './types';
 
 /** Maximum number of ranked entries shown in the formatted output. */
 const TOP_RANKED = 3;
 
 /** Default maximum number of listing entries shown before truncation. */
 const MAX_LISTING_SHOWN = 5;
-
-/** Higher limit for categories that tend to have more entries. */
-const MAX_LISTING_SHOWN_EXTENDED = 10;
 
 /**
  * Escapes characters that have special meaning in Discord markdown.
@@ -64,21 +61,34 @@ function formatUserTallyRanked(entries: readonly UserTally[]): string {
  *
  * @param title   - Section heading (e.g. "Reply Submissions").
  * @param entries - All entries in this listing category.
+ * @param showAll - When true, all entries are shown without truncation.
  * @returns Formatted section string, or empty string if no entries exist.
  */
-function formatListingSection(title: string, entries: readonly SubmissionEntry[], maxShown: number = MAX_LISTING_SHOWN): string {
+function formatListingSection(title: string, entries: readonly SubmissionEntry[], showAll: boolean = false): string {
   if (entries.length === 0) return '';
 
   const lines = [`### ${title}`];
-  const shown = entries.slice(0, maxShown);
+  const shown = showAll ? entries : entries.slice(0, MAX_LISTING_SHOWN);
   for (const entry of shown) {
     lines.push(`- ${entry.messageLink}`);
   }
-  if (entries.length > maxShown) {
-    lines.push(`and ${entries.length - maxShown} more...`);
+  if (!showAll && entries.length > MAX_LISTING_SHOWN) {
+    lines.push(`and ${entries.length - MAX_LISTING_SHOWN} more...`);
   }
 
   return lines.join('\n');
+}
+
+/** Formats the aggregate stats section. */
+function formatStats(stats: Stats): string {
+  return [
+    '### Stats',
+    `Total valid messages: ${stats.totalValidMessages}`,
+    `Unique senders: ${stats.totalSenders}`,
+    `Unique receivers: ${stats.totalReceivers}`,
+    `Unique participants: ${stats.totalParticipants}`,
+    `Total reactions: ${stats.totalReactions}`,
+  ].join('\n');
 }
 
 /**
@@ -89,12 +99,20 @@ function formatListingSection(title: string, entries: readonly SubmissionEntry[]
  *
  * @param result    - The complete tallying result to format.
  * @param timestamp - Unix timestamp (seconds) for the footer; defaults to current time.
+ * @param options   - `showAll`: when true, listing sections are not truncated.
  * @returns Plain text string ready to post as a Discord message.
  */
-export function formatDiscordMessage(result: KindnessCascadeResult, timestamp: number = Math.floor(Date.now() / 1000)): string {
+export function formatDiscordMessage(
+  result: KindnessCascadeResult,
+  timestamp: number = Math.floor(Date.now() / 1000),
+  options?: { readonly showAll?: boolean },
+): string {
+  const showAll = options?.showAll ?? false;
   const sections: string[] = [];
 
   sections.push('**__Kindness Cascade Tally__**');
+
+  sections.push(formatStats(result.stats));
 
   // Ranked sections — always show top 3 regardless of how many the API returned.
   // Joined with double newlines (single blank line) to keep them visually grouped.
@@ -109,10 +127,10 @@ export function formatDiscordMessage(result: KindnessCascadeResult, timestamp: n
 
   // Listing sections — skip empty categories, exclude invalidSubmissions
   const listingSections = [
-    formatListingSection('Reply Submissions', result.listings.replySubmissions),
-    formatListingSection('Multi Mention Submissions', result.listings.multiMentionSubmissions, MAX_LISTING_SHOWN_EXTENDED),
-    formatListingSection('Different Format Submissions', result.listings.differentFormatSubmissions, MAX_LISTING_SHOWN_EXTENDED),
-    formatListingSection('Missing Votes', result.listings.missingVotes),
+    formatListingSection('Reply Submissions', result.listings.replySubmissions, showAll),
+    formatListingSection('Multi Mention Submissions', result.listings.multiMentionSubmissions, showAll),
+    formatListingSection('Different Format Submissions', result.listings.differentFormatSubmissions, showAll),
+    formatListingSection('Missing Votes', result.listings.missingVotes, showAll),
   ].filter((s) => s.length > 0);
 
   if (listingSections.length > 0) {
