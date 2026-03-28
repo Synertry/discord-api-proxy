@@ -55,6 +55,15 @@ const submissionEntrySchema = z.object({
   reactionCount: z.number(),
 });
 
+/** Schema for aggregate statistics computed from valid messages. */
+const statsSchema = z.object({
+  totalValidMessages: z.number(),
+  totalSenders: z.number(),
+  totalReceivers: z.number(),
+  totalParticipants: z.number(),
+  totalReactions: z.number(),
+});
+
 /** Full JSON response schema for the Kindness Cascade tallying endpoint. */
 export const kindnessCascadeResponseSchema = z.object({
   ranked: z.object({
@@ -72,6 +81,7 @@ export const kindnessCascadeResponseSchema = z.object({
     invalidSubmissions: z.array(submissionEntrySchema),
     counts: z.record(z.string(), z.number()),
   }),
+  stats: statsSchema,
 });
 
 /** Error response schema used for 400 and 502 responses. */

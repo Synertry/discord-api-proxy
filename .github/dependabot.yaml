@@ -35,11 +35,6 @@ updates:
         update-types:
           - "patch"
           - "minor"
-    ignore:
-      - dependency-name: "vitest"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "vitest-coverage"
-        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /

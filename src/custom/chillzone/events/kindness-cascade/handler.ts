@@ -115,8 +115,9 @@ kindnessCascadeRoutes.get('/kindness-cascade', async (c, next) => {
   const fetcher = c.var.proxyFetch ?? fetch;
 
   try {
-    const result = await runPipeline(channelId, guildId, token, fetcher, all === 'true');
-    return c.text(formatDiscordMessage(result));
+    const showAll = all === 'true';
+    const result = await runPipeline(channelId, guildId, token, fetcher, showAll);
+    return c.text(formatDiscordMessage(result, undefined, { showAll }));
   } catch (err) {
     if (err instanceof DiscordApiError) {
       return handleDiscordError(c, err);

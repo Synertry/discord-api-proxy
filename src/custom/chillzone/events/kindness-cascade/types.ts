@@ -153,8 +153,18 @@ export interface ListingCategories {
   counts: Record<string, number>;
 }
 
+/** Aggregate statistics computed from valid (ranked-eligible) messages. */
+export interface Stats {
+  totalValidMessages: number;
+  totalSenders: number;
+  totalReceivers: number;
+  totalParticipants: number;
+  totalReactions: number;
+}
+
 /** Complete result of the Kindness Cascade tallying pipeline. */
 export interface KindnessCascadeResult {
   ranked: RankedCategories;
   listings: ListingCategories;
+  stats: Stats;
 }
