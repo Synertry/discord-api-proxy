@@ -18,7 +18,7 @@
  * to the ranked leaderboards. Listings include all non-skipped classifications.
  */
 
-import type { ClassifiedMessage, UserEntity, UserTally, SubmissionEntry, KindnessCascadeResult } from './types';
+import type { ClassifiedMessage, UserEntity, UserTally, SubmissionEntry, Stats, KindnessCascadeResult } from './types';
 
 /** Classifications that count toward ranked leaderboards. */
 const VALID_CLASSIFICATIONS = new Set(['standard', 'reply', 'multi-mention', 'different-format']);
@@ -119,9 +119,34 @@ function rankSubmissions(messages: readonly ClassifiedMessage[], limit?: number)
   return limit !== undefined ? sorted.slice(0, limit) : sorted;
 }
 
+/** Computes aggregate statistics from valid (ranked-eligible) messages. */
+function computeStats(validMessages: readonly ClassifiedMessage[]): Stats {
+  const senderIds = new Set<string>();
+  const receiverIds = new Set<string>();
+  let totalReactions = 0;
+
+  for (const msg of validMessages) {
+    senderIds.add(msg.sender.userId);
+    for (const r of msg.recipients) {
+      receiverIds.add(r.userId);
+    }
+    totalReactions += msg.reactionCount;
+  }
+
+  const participantIds = new Set([...senderIds, ...receiverIds]);
+
+  return {
+    totalValidMessages: validMessages.length,
+    totalSenders: senderIds.size,
+    totalReceivers: receiverIds.size,
+    totalParticipants: participantIds.size,
+    totalReactions,
+  };
+}
+
 /**
- * Main tallying entry point. Filters valid messages, computes all ranked leaderboards
- * and listing groups, and returns a complete {@link KindnessCascadeResult}.
+ * Main tallying entry point. Filters valid messages, computes all ranked leaderboards,
+ * listing groups, and aggregate statistics.
  *
  * @param classified - All classified messages from the channel.
  * @param options    - `{ all: true }` returns every entry; `{ all: false }` caps at top 10.
@@ -139,6 +164,7 @@ export function tally(classified: readonly ClassifiedMessage[], options: { reado
       topVotedReceiver: tallyVotes(validMessages, (m) => m.recipients.map((r) => ({ user: r, votes: m.reactionCount })), limit),
     },
     listings: buildListings(classified),
+    stats: computeStats(validMessages),
   };
 }
 
