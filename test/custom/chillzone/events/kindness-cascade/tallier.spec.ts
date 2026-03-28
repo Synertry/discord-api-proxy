@@ -161,6 +161,39 @@ describe('tally', () => {
     });
   });
 
+  describe('stats', () => {
+    it('should compute aggregate stats from valid messages', () => {
+      const result = tally(getClassified(), { all: true });
+      const { stats } = result;
+
+      // Valid messages: STANDARD, STANDARD_2, STANDARD_HIGH_VOTES, REPLY, MULTI_MENTION, NICKNAME_MENTION, DIFFERENT_FORMAT = 7
+      expect(stats.totalValidMessages).toBe(7);
+
+      // Senders: alice (sender1), bob (sender2), charlie (sender3) = 3
+      expect(stats.totalSenders).toBe(3);
+
+      // Receivers: diana (recipient1), eve (recipient2), alice (sender1 via reply) = 3
+      expect(stats.totalReceivers).toBe(3);
+
+      // Participants: alice, bob, charlie, diana, eve = 5 unique
+      expect(stats.totalParticipants).toBe(5);
+
+      // Reactions: 3 + 3 + 10 + 5 + 4 + 1 + 2 = 28
+      expect(stats.totalReactions).toBe(28);
+    });
+
+    it('should return zero stats for empty input', () => {
+      const result = tally([], { all: true });
+      expect(result.stats).toEqual({
+        totalValidMessages: 0,
+        totalSenders: 0,
+        totalReceivers: 0,
+        totalParticipants: 0,
+        totalReactions: 0,
+      });
+    });
+  });
+
   describe('edge cases', () => {
     it('should handle empty classified messages', () => {
       const result = tally([], { all: true });

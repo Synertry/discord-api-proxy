@@ -43,6 +43,14 @@ function makeResult(overrides?: Partial<KindnessCascadeResult>): KindnessCascade
       counts: {},
       ...overrides?.listings,
     },
+    stats: {
+      totalValidMessages: 0,
+      totalSenders: 0,
+      totalReceivers: 0,
+      totalParticipants: 0,
+      totalReactions: 0,
+      ...overrides?.stats,
+    },
   };
 }
 
@@ -226,5 +234,71 @@ describe('formatDiscordMessage', () => {
     expect(output).toContain('### Different Format Submissions');
     expect(output).toContain('- https://discord.com/channels/g/c/500');
     expect(output).toContain('- https://discord.com/channels/g/c/501');
+  });
+
+  it('should render stats section with all stat lines', () => {
+    const result = makeResult({
+      stats: {
+        totalValidMessages: 42,
+        totalSenders: 10,
+        totalReceivers: 15,
+        totalParticipants: 20,
+        totalReactions: 137,
+      },
+    });
+    const output = formatDiscordMessage(result, FIXED_TIMESTAMP);
+    expect(output).toContain('### Stats');
+    expect(output).toContain('Total valid messages: 42');
+    expect(output).toContain('Unique senders: 10');
+    expect(output).toContain('Unique receivers: 15');
+    expect(output).toContain('Unique participants: 20');
+    expect(output).toContain('Total reactions: 137');
+  });
+
+  it('should place stats section between header and rankings', () => {
+    const result = makeResult({
+      stats: { totalValidMessages: 1, totalSenders: 1, totalReceivers: 1, totalParticipants: 1, totalReactions: 1 },
+    });
+    const output = formatDiscordMessage(result, FIXED_TIMESTAMP);
+    const headerIdx = output.indexOf('**__Kindness Cascade Tally__**');
+    const statsIdx = output.indexOf('### Stats');
+    const rankedIdx = output.indexOf('### Top Voted Kindness');
+    expect(statsIdx).toBeGreaterThan(headerIdx);
+    expect(rankedIdx).toBeGreaterThan(statsIdx);
+  });
+
+  it('should show all listing entries when showAll is true', () => {
+    const submissions = Array.from({ length: 12 }, (_, i) => makeSubmission(`${i + 1}`, 1));
+    const result = makeResult({
+      listings: {
+        replySubmissions: submissions,
+        multiMentionSubmissions: [],
+        differentFormatSubmissions: [],
+        missingVotes: [],
+        invalidSubmissions: [],
+        counts: { replySubmissions: 12 },
+      },
+    });
+    const output = formatDiscordMessage(result, FIXED_TIMESTAMP, { showAll: true });
+    expect(output).toContain('- https://discord.com/channels/g/c/12');
+    expect(output).not.toContain('more...');
+  });
+
+  it('should truncate listings at 5 when showAll is false', () => {
+    const submissions = Array.from({ length: 8 }, (_, i) => makeSubmission(`${i + 1}`, 1));
+    const result = makeResult({
+      listings: {
+        replySubmissions: submissions,
+        multiMentionSubmissions: [],
+        differentFormatSubmissions: [],
+        missingVotes: [],
+        invalidSubmissions: [],
+        counts: { replySubmissions: 8 },
+      },
+    });
+    const output = formatDiscordMessage(result, FIXED_TIMESTAMP, { showAll: false });
+    expect(output).toContain('- https://discord.com/channels/g/c/5');
+    expect(output).not.toContain('- https://discord.com/channels/g/c/6');
+    expect(output).toContain('and 3 more...');
   });
 });
