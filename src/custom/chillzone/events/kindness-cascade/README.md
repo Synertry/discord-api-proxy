@@ -37,11 +37,18 @@ GET /custom/chillzone/events/kindness-cascade
     "missingVotes":              [...],
     "invalidSubmissions":        [...],
     "counts": { "replySubmissions": 21, ... }
+  },
+  "stats": {
+    "totalValidMessages": 42,
+    "totalSenders": 10,
+    "totalReceivers": 15,
+    "totalParticipants": 20,
+    "totalReactions": 137
   }
 }
 ```
 
-**Formatted text** (`?formattedMessage=true`) - Returns `text/plain` with Discord markdown, ready to post as a message. Shows top 3 ranked entries, up to 5 listing entries with truncation, and a dynamic Discord timestamp footer.
+**Formatted text** (`?formattedMessage=true`) - Returns `text/plain` with Discord markdown, ready to post as a message. Shows aggregate stats, top 3 ranked entries, up to 5 listing entries with truncation, and a dynamic Discord timestamp footer. When combined with `all=true`, listing sections are shown without truncation.
 
 ## Pipeline
 
@@ -69,7 +76,7 @@ Each message is classified into one of:
 
 ### 3. Tally (`tallier.ts`)
 
-Aggregates classified messages into two sections:
+Aggregates classified messages into three sections:
 
 **Ranked categories** (sorted descending, top 10 by default):
 - **topVotedKindness** - Submissions ranked by individual reaction count
@@ -81,6 +88,9 @@ Aggregates classified messages into two sections:
 **Listing categories** (all entries, with sparse counts):
 - Reply submissions, multi-mention submissions, different-format submissions
 - Missing votes, invalid submissions
+
+**Stats** (aggregate counts from valid messages):
+- Total valid messages, unique senders, unique receivers, unique participants, total reactions
 
 ### 4. Format (`formatter.ts`)
 

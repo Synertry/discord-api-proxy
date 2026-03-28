@@ -155,7 +155,7 @@ Returns `{ "tally": 0 }`. Placeholder for now. Not yet imported from my private 
 ## Testing
 
 ```bash
-bun run test           # Run all 79 tests across 10 suites
+bun run test           # Run all 88 tests across 10 suites
 bun run test -- --ui   # Open Vitest UI
 ```
 
