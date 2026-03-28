@@ -83,7 +83,7 @@ function formatListingSection(title: string, entries: readonly SubmissionEntry[]
 function formatStats(stats: Stats): string {
   return [
     '### Stats',
-    `Total valid messages: ${stats.totalValidMessages}`,
+    `Total submissions: ${stats.totalValidMessages}`,
     `Unique senders: ${stats.totalSenders}`,
     `Unique receivers: ${stats.totalReceivers}`,
     `Unique participants: ${stats.totalParticipants}`,

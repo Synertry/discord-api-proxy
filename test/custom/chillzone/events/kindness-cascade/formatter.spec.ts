@@ -248,7 +248,7 @@ describe('formatDiscordMessage', () => {
     });
     const output = formatDiscordMessage(result, FIXED_TIMESTAMP);
     expect(output).toContain('### Stats');
-    expect(output).toContain('Total valid messages: 42');
+    expect(output).toContain('Total submissions: 42');
     expect(output).toContain('Unique senders: 10');
     expect(output).toContain('Unique receivers: 15');
     expect(output).toContain('Unique participants: 20');

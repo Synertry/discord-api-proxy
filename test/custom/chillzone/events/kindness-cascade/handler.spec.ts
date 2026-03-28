@@ -175,7 +175,7 @@ describe('kindness-cascade handler', () => {
     expect(body).toContain('### Top Voted Submitter');
     expect(body).toContain('### Top Voted Receiver');
     expect(body).toContain('### Stats');
-    expect(body).toContain('Total valid messages:');
+    expect(body).toContain('Total submissions:');
     expect(body).toContain('-# Updated as of <t:');
   });
 
