@@ -35,10 +35,10 @@
 		"yaml": "^2.8.3"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.13.5",
+		"@cloudflare/vitest-pool-workers": "^0.14.0",
 		"@types/node": "^25.5.0",
 		"typescript": "^6.0.2",
 		"vitest": "^4.1.2",
-		"wrangler": "^4.78.0"
+		"wrangler": "^4.79.0"
 	}
 }
