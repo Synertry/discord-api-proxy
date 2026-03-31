@@ -57,7 +57,7 @@ export const snowflakeValidatorMiddleware = createMiddleware(async (c, next) => 
       if ((resource === 'users' || resource === 'applications') && id === '@me') {
         continue;
       }
-      if (resource === 'messages' && id === '@original') {
+      if (resource === 'messages' && (id === '@original' || id === 'search' || id === 'pins' || id === 'bulk-delete')) {
         continue;
       }
 
