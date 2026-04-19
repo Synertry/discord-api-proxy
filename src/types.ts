@@ -20,8 +20,12 @@ export type Bindings = {
   DISCORD_TOKEN_BOT: string;
   /** Discord user token for endpoints that require user-level authentication (e.g. guild fetches). */
   DISCORD_TOKEN_USER: string;
+  /** Optional alternate Discord user token (e.g. for a premium account with access to locked channels). Paired with `AUTH_KEY_PREMIUM`. */
+  DISCORD_TOKEN_USER_PREMIUM?: string;
   /** Secret key used to authenticate incoming requests to this proxy via `x-auth-key` or `Authorization`. */
   AUTH_KEY: string;
+  /** Optional second auth key. Requests authenticated with this key are routed to `DISCORD_TOKEN_USER_PREMIUM` for user-context calls. */
+  AUTH_KEY_PREMIUM?: string;
 };
 
 /**

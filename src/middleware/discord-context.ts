@@ -20,6 +20,7 @@
 
 import { createMiddleware } from 'hono/factory';
 import type { Bindings } from '../types';
+import type { AuthVariables } from './auth';
 
 /** Browser-like User-Agent sent with user-token requests to avoid bot detection. */
 export const BROWSER_USER_AGENT =
@@ -39,12 +40,20 @@ export type DiscordContextVariables = {
  * Sets {@link DiscordContextVariables} on the request context for downstream handlers.
  *
  * Token selection priority:
- * 1. `x-proxy-context: user` → user token + browser User-Agent
- * 2. `x-proxy-context: bot` → bot token (no custom User-Agent)
- * 3. No header, path contains `/guilds` → user token (fallback heuristic)
- * 4. No header, other paths → bot token
+ * 1. `x-proxy-context: user` -> user token + browser User-Agent
+ * 2. `x-proxy-context: bot` -> bot token (no custom User-Agent)
+ * 3. No header, path contains `/guilds` -> user token (fallback heuristic)
+ * 4. No header, other paths -> bot token
+ *
+ * When the user-token branch is selected, the paired Discord user token is chosen
+ * based on the `authSlot` set by {@link authMiddleware}:
+ * - `default` -> `DISCORD_TOKEN_USER`
+ * - `premium` -> `DISCORD_TOKEN_USER_PREMIUM` (errors 503 if not configured)
  */
-export const discordContextMiddleware = createMiddleware<{ Bindings: Bindings; Variables: DiscordContextVariables }>(async (c, next) => {
+export const discordContextMiddleware = createMiddleware<{
+  Bindings: Bindings;
+  Variables: DiscordContextVariables & AuthVariables;
+}>(async (c, next) => {
   const path = c.req.path;
   const proxyContext = (c.req.header('x-proxy-context') || '').toLowerCase();
 
@@ -60,7 +69,18 @@ export const discordContextMiddleware = createMiddleware<{ Bindings: Bindings; V
   }
 
   if (useUserToken) {
-    c.set('discordToken', c.env.DISCORD_TOKEN_USER);
+    const slot = c.get('authSlot');
+    let userToken: string;
+    if (slot === 'premium') {
+      if (!c.env.DISCORD_TOKEN_USER_PREMIUM) {
+        console.error('FATAL: AUTH_KEY_PREMIUM accepted but DISCORD_TOKEN_USER_PREMIUM is not configured');
+        return c.json({ error: 'Service misconfigured' }, 503);
+      }
+      userToken = c.env.DISCORD_TOKEN_USER_PREMIUM;
+    } else {
+      userToken = c.env.DISCORD_TOKEN_USER;
+    }
+    c.set('discordToken', userToken);
     c.set('discordUserAgent', BROWSER_USER_AGENT);
   } else {
     c.set('discordToken', `Bot ${c.env.DISCORD_TOKEN_BOT}`);

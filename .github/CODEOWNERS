@@ -4,4 +4,7 @@
 # This owner will be the default owner for everything in
 # the repo. Unless a later match takes precedence,
 # @Synertry will be requested for review when someone opens a pull request.
-*       @Synertry
+# *       @Synertry
+
+# Source code files
+src/*   @Synertry
