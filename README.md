@@ -13,7 +13,7 @@ Original motivation was for my Google Sheets to be able to call the Discord API,
 ## Features
 
 - **Reverse proxy** - Forwards any request to `https://discord.com/api/v10` with automatic token injection
-- **Dual token support** - Switches between bot and user tokens based on the endpoint or an explicit header
+- **Dual token support** - Switches between bot and user tokens based on the endpoint or an explicit header. Optionally routes to a second user token (e.g. a premium alt account) when the request authenticates with `AUTH_KEY_PREMIUM`.
 - **Snowflake validation** - Validates Discord IDs in URL paths before forwarding, returning Discord-compatible error responses
 - **Rate limit interception** - Reformats 429 responses into a consistent JSON envelope
 - **Custom endpoints** - Server-specific business logic that processes Discord data server-side
@@ -52,6 +52,15 @@ DISCORD_TOKEN_BOT=your-bot-token
 DISCORD_TOKEN_USER=your-user-token
 AUTH_KEY=your-api-key
 ```
+
+Optional - add a second user token (e.g. a premium account with access to locked channels) to route gated requests through a separate auth context:
+
+```env
+DISCORD_TOKEN_USER_PREMIUM=your-premium-user-token
+AUTH_KEY_PREMIUM=your-second-api-key
+```
+
+Requests authenticated with `AUTH_KEY_PREMIUM` and using the `x-proxy-context: user` path are proxied with `DISCORD_TOKEN_USER_PREMIUM`; everything else continues to use the default pair. Both premium bindings must be set together - if a user-context request arrives authenticated with `AUTH_KEY_PREMIUM` while `DISCORD_TOKEN_USER_PREMIUM` is unset, the proxy returns 503 rather than silently downgrading to the default user token. Bot-context requests always use `DISCORD_TOKEN_BOT` regardless of which auth key matched.
 
 > [!CAUTION]
 > I advise to use an alt account for the user token to avoid any future risks for your main account of being banned by Discord.

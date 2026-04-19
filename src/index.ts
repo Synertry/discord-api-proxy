@@ -20,6 +20,7 @@
 
 import { OpenAPIHono } from '@hono/zod-openapi';
 import type { Bindings } from './types';
+import type { AuthVariables } from './middleware/auth';
 import type { DiscordContextVariables } from './middleware/discord-context';
 
 import { authMiddleware } from './middleware/auth';
@@ -44,7 +45,7 @@ import { proxyRoute } from './routes/proxy';
  * @returns Configured Hono app instance.
  */
 export function createApp(mockFetch?: typeof fetch) {
-  const app = new OpenAPIHono<{ Bindings: Bindings; Variables: DiscordContextVariables }>();
+  const app = new OpenAPIHono<{ Bindings: Bindings; Variables: DiscordContextVariables & AuthVariables }>();
 
   // Inject mock fetch for testing — makes it available via c.var.proxyFetch
   if (mockFetch) {
