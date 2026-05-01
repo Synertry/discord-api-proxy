@@ -29,7 +29,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v6.0.2
       - name: Label PR based on size
-        uses: cbrgm/pr-size-labeler-action@v1.3.7
+        uses: cbrgm/pr-size-labeler-action@v1.3.8
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }} # Pass the GitHub token for authentication
           github_repository: ${{ github.repository }} # Pass the repository name
