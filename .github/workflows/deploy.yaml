@@ -12,6 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '22'
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2.2.0
         with:
@@ -40,7 +45,7 @@ jobs:
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Generate Cloudflare Worker types
-        run: bun run cf-typegen
+        run: node ./node_modules/wrangler/bin/wrangler.js types --env-interface CloudflareBindings
 
       - name: Inject custom domain
         run: |
@@ -94,14 +99,14 @@ jobs:
 
           # --- 2. UPLOAD ---
           echo "🚀 Uploading..."
-          bun run wrangler versions upload \
+          node ./node_modules/wrangler/bin/wrangler.js versions upload \
             --message "$DEPLOY_MSG" \
             --tag "$SHORT_SHA"
 
           # --- 3. RETRIEVE ID ---
           echo "🔍 verifying upload..."
           # Filter specifically by our tag
-          VERSION_ID=$(bun run wrangler versions list --json | jq -r --arg tag "$SHORT_SHA" '.[] | select(.annotations["workers/tag"] == $tag) | .id')
+          VERSION_ID=$(node ./node_modules/wrangler/bin/wrangler.js versions list --json | jq -r --arg tag "$SHORT_SHA" '.[] | select(.annotations["workers/tag"] == $tag) | .id')
 
           if [ -z "$VERSION_ID" ] || [ "$VERSION_ID" == "null" ]; then
             echo "::error::Version ID not found for tag $SHORT_SHA"
@@ -112,6 +117,6 @@ jobs:
 
           # --- 4. PROMOTE ---
           echo "🚢 Promoting to live..."
-          bun run wrangler versions deploy "$VERSION_ID" \
+          node ./node_modules/wrangler/bin/wrangler.js versions deploy "$VERSION_ID" \
             --message "$DEPLOY_MSG" \
             --yes

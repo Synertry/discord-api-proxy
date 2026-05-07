@@ -22,7 +22,6 @@
 		"hono"
 	],
 	"scripts": {
-		"postinstall": "bun run cf-typegen",
 		"lint": "tsc --noEmit",
 		"test": "vitest",
 		"dev": "wrangler dev",
