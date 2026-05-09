@@ -18,11 +18,11 @@ import { OpenAPIHono } from '@hono/zod-openapi';
 import { bingoRoutes } from '../../../../../src/custom/chillzone/events/bingo/handler';
 import { __resetBingoClientCachesForTests } from '../../../../../src/custom/chillzone/events/bingo/discord-client';
 import {
+	CHANNELS_FUN,
 	CHANNELS_GENERAL,
 	CHANNEL_COUNTING,
 	CHANNEL_SUPPORTERS,
 	CHILLZONE_GUILD_ID,
-	FUN_CATEGORY_ID,
 	ROLE_MILLIONAIRES,
 	ROLES_SUPREME,
 } from '../../../../../src/custom/chillzone/events/bingo/constants';
@@ -38,21 +38,6 @@ const MOCK_ENV: Bindings = {
 	DISCORD_TOKEN_USER: 'user-token',
 };
 
-interface MockFunChannel {
-	id: string;
-	type: number;
-	parent_id: string | null;
-}
-
-const FUN_CHANNELS: readonly MockFunChannel[] = [
-	{ id: '800000000000000001', type: 0, parent_id: FUN_CATEGORY_ID },
-	{ id: '800000000000000002', type: 0, parent_id: FUN_CATEGORY_ID },
-	// Should be filtered out: wrong category.
-	{ id: '900000000000000003', type: 0, parent_id: '999999999999999999' },
-	// Should be filtered out: not a text channel (e.g. voice).
-	{ id: '900000000000000004', type: 2, parent_id: FUN_CATEGORY_ID },
-];
-
 /** Builds a JSON Response with the given body. */
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
 	return new Response(JSON.stringify(body), {
@@ -66,13 +51,13 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
  * Creates a fetch mock that routes Discord API calls to canned responses.
  * - `messages/search` returns 1 unless `searchOverrides` says otherwise (matched by URL substring).
  * - `members/<userId>` returns the supplied member object.
- * - `channels` returns the {@link FUN_CHANNELS} list.
+ *
+ * Fun-channels list is hardcoded in `constants.ts`, so no /guilds/{id}/channels mock is needed.
  */
 function createFetchMock(opts: {
 	memberRoles?: readonly string[];
 	memberStatus?: number;
 	searchOverrides?: ReadonlyArray<{ match: (url: string) => boolean; total: number }>;
-	channelsStatus?: number;
 }) {
 	return vi.fn(async (input: RequestInfo | URL) => {
 		const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -83,13 +68,6 @@ function createFetchMock(opts: {
 			}
 			const memberId = url.split('/members/')[1].split('?')[0];
 			return jsonResponse({ user: { id: memberId }, roles: opts.memberRoles ?? [] });
-		}
-
-		if (url.includes(`/guilds/${CHILLZONE_GUILD_ID}/channels`)) {
-			if (opts.channelsStatus && opts.channelsStatus >= 400) {
-				return new Response('{"message":"err"}', { status: opts.channelsStatus });
-			}
-			return jsonResponse(FUN_CHANNELS);
 		}
 
 		if (url.includes(`/guilds/${CHILLZONE_GUILD_ID}/messages/search`)) {
@@ -119,7 +97,9 @@ beforeEach(() => {
 });
 
 describe('bingo /participant/:userId/counts', () => {
-	it('returns the aggregated counts shape for a valid user', async () => {
+	// Counts hits ~26 mocked Discord calls; the in-worker fetchWithRetry pre-call
+	// floor (250ms) means wall-clock ~6.5s. Default vitest timeout is 5s.
+	it('returns the aggregated counts shape for a valid user', { timeout: 30_000 }, async () => {
 		const mockFetch = createFetchMock({
 			searchOverrides: [
 				{ match: (u) => u.includes(`channel_id=${CHANNEL_COUNTING}`), total: 312 },
@@ -142,7 +122,10 @@ describe('bingo /participant/:userId/counts', () => {
 		expect(body.msgsTotalGuildAllTime).toBe(489210);
 		expect(body.counting.total).toBe(312);
 		expect(body.supporters.total).toBe(18);
-		expect(body.fun.total).toBe(2); // two text fun channels x default total_results=1
+		// Counting matcher returns 312; every other fun channel falls through to 1.
+		expect(body.fun.total).toBe(312 + (CHANNELS_FUN.length - 1));
+		expect(body.fun.byChannel[CHANNEL_COUNTING]).toBe(312);
+		expect(Object.keys(body.fun.byChannel)).toHaveLength(CHANNELS_FUN.length);
 		expect(Object.keys(body.generals)).toHaveLength(CHANNELS_GENERAL.length);
 	});
 
@@ -150,14 +133,6 @@ describe('bingo /participant/:userId/counts', () => {
 		const mockFetch = createFetchMock({});
 		const res = await createTestApp(mockFetch).request('http://localhost/participant/not-a-snowflake/counts', {}, MOCK_ENV);
 		expect(res.status).toBe(400);
-	});
-
-	it('returns 502 when Discord returns 403 from the channels-list call', async () => {
-		const mockFetch = createFetchMock({ channelsStatus: 403 });
-		const res = await createTestApp(mockFetch).request(`http://localhost/participant/${TEST_USER_ID}/counts`, {}, MOCK_ENV);
-		expect(res.status).toBe(502);
-		const body = await res.json();
-		expect(body.error).toContain('Cannot access');
 	});
 });
 

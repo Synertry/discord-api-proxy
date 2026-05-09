@@ -10,13 +10,14 @@
  * @module bingo/discord-client
  * Low-level Discord API client used by the bingo aggregator and roles handler.
  *
- * Three operations:
+ * Two network operations + one constant accessor:
  * - {@link BingoDiscordClient.countMessages} reads `total_results` from
  *   `GET /guilds/{guildId}/messages/search` (limit=1 to keep the payload small).
  * - {@link BingoDiscordClient.fetchGuildMember} fetches one guild member,
  *   memoised in an isolate-scope cache for 60s.
- * - {@link BingoDiscordClient.resolveFunChannels} expands {@link FUN_CATEGORY_ID}
- *   to the list of child text channels, memoised for the life of the isolate.
+ * - {@link BingoDiscordClient.resolveFunChannels} returns the hardcoded
+ *   {@link CHANNELS_FUN} list (no Discord call) - the dynamic category resolver
+ *   was traded away for a curated allowlist that excludes 403-prone members.
  *
  * All Discord calls go through {@link fetchWithRetry} which applies the
  * standard 1.5x backoff / 0.85x decay around 429 / 5xx responses, honors
@@ -24,13 +25,10 @@
  * sequentially - never `Promise.all` - to stay friendly to the per-route bucket.
  */
 
-import { CHILLZONE_GUILD_ID, FUN_CATEGORY_ID } from './constants';
-import type { DiscordGuildChannel, DiscordGuildMember, DiscordSearchResponse } from './types';
+import { CHANNELS_FUN, CHILLZONE_GUILD_ID } from './constants';
+import type { DiscordGuildMember, DiscordSearchResponse } from './types';
 
 const DISCORD_API_BASE = 'https://discord.com/api/v10';
-
-/** Discord text channel type (`GUILD_TEXT`). */
-const CHANNEL_TYPE_TEXT = 0;
 
 /** Per-call HTTP timeout. */
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -69,9 +67,6 @@ export class DiscordApiError extends Error {
 		this.name = 'DiscordApiError';
 	}
 }
-
-/** Per-isolate, no-TTL cache for the fun-category expansion. */
-let funChannelsCache: readonly string[] | null = null;
 
 /** Per-isolate member cache with short TTL. */
 const memberCache = new Map<string, { value: DiscordGuildMember; expiresAt: number }>();
@@ -195,25 +190,13 @@ export function createBingoDiscordClient(args: {
 		},
 
 		async resolveFunChannels(): Promise<readonly string[]> {
-			if (funChannelsCache) return funChannelsCache;
-
-			const url = `${DISCORD_API_BASE}/guilds/${CHILLZONE_GUILD_ID}/channels`;
-			const response = await fetchWithRetry(url, headers, fetcher);
-			const channels = (await response.json()) as readonly DiscordGuildChannel[];
-			if (!Array.isArray(channels)) {
-				throw new DiscordApiError(response.status, 'Unexpected channels response format');
-			}
-
-			const ids = channels.filter((ch) => ch.parent_id === FUN_CATEGORY_ID && ch.type === CHANNEL_TYPE_TEXT).map((ch) => ch.id);
-			funChannelsCache = ids;
-			return ids;
+			return CHANNELS_FUN;
 		},
 	};
 }
 
 /** Test helper: clears all module-scope caches. */
 export function __resetBingoClientCachesForTests(): void {
-	funChannelsCache = null;
 	memberCache.clear();
 	rateState.delayMs = START_DELAY_MS;
 	rateState.successStreak = 0;

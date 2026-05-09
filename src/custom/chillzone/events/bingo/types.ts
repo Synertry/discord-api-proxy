@@ -22,14 +22,6 @@ export interface DiscordSearchResponse {
 	readonly total_results: number;
 }
 
-/** Subset of `GET /guilds/{id}/channels` response we read. */
-export interface DiscordGuildChannel {
-	readonly id: string;
-	readonly type: number;
-	readonly parent_id: string | null;
-	readonly name?: string;
-}
-
 /** Subset of `GET /guilds/{id}/members/{userId}` response we read. */
 export interface DiscordGuildMember {
 	readonly user: { readonly id: string };

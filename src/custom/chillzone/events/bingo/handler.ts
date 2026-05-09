@@ -23,13 +23,32 @@
 import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
 import type { Context } from 'hono';
 import type { Bindings } from '../../../../types';
-import type { DiscordContextVariables } from '../../../../middleware/discord-context';
+import type { AuthVariables } from '../../../../middleware/auth';
+import { BROWSER_USER_AGENT, type DiscordContextVariables } from '../../../../middleware/discord-context';
 import { aggregateCounts } from './aggregator';
 import { createBingoDiscordClient, DiscordApiError } from './discord-client';
 import { deriveRoles } from './roles';
 import { bingoParticipantParamsSchema, countsResponseSchema, errorResponseSchema, rolesResponseSchema } from './schemas';
 
-type Env = { Bindings: Bindings; Variables: DiscordContextVariables };
+type Env = { Bindings: Bindings; Variables: DiscordContextVariables & AuthVariables };
+
+/**
+ * ChillZone is a guild where Synertry is a regular member only - the bot has no
+ * access. Every bingo Discord call must run through the user token regardless
+ * of what the path-based heuristic in `discordContextMiddleware` picked. The
+ * `authSlot` set by `authMiddleware` still chooses between default and premium
+ * user-token bindings; an unconfigured slot is reported as `null` so the caller
+ * can short-circuit with a typed 503.
+ */
+function pickUserToken(c: Context<Env>): string | null {
+	const slot = c.var.authSlot;
+	const token = slot === 'premium' ? c.env.DISCORD_TOKEN_USER_PREMIUM : c.env.DISCORD_TOKEN_USER;
+	if (!token) {
+		console.error(`FATAL: bingo route reached but DISCORD_TOKEN_USER${slot === 'premium' ? '_PREMIUM' : ''} is not configured`);
+		return null;
+	}
+	return token;
+}
 
 const countsRoute = createRoute({
 	method: 'get',
@@ -47,6 +66,10 @@ const countsRoute = createRoute({
 		502: {
 			content: { 'application/json': { schema: errorResponseSchema } },
 			description: 'Discord API error',
+		},
+		503: {
+			content: { 'application/json': { schema: errorResponseSchema } },
+			description: 'User token not configured for the auth slot',
 		},
 	},
 });
@@ -67,6 +90,10 @@ const rolesRoute = createRoute({
 		502: {
 			content: { 'application/json': { schema: errorResponseSchema } },
 			description: 'Discord API error',
+		},
+		503: {
+			content: { 'application/json': { schema: errorResponseSchema } },
+			description: 'User token not configured for the auth slot',
 		},
 	},
 });
@@ -89,9 +116,12 @@ export const bingoRoutes = new OpenAPIHono<Env>();
 
 bingoRoutes.openapi(countsRoute, async (c) => {
 	const { userId } = c.req.valid('param');
+	const token = pickUserToken(c);
+	if (!token) return c.json({ error: 'Service misconfigured' }, 503);
+
 	const client = createBingoDiscordClient({
-		token: c.var.discordToken,
-		userAgent: c.var.discordUserAgent,
+		token,
+		userAgent: BROWSER_USER_AGENT,
 		fetcher: c.var.proxyFetch ?? fetch,
 	});
 
@@ -109,9 +139,12 @@ bingoRoutes.openapi(countsRoute, async (c) => {
 
 bingoRoutes.openapi(rolesRoute, async (c) => {
 	const { userId } = c.req.valid('param');
+	const token = pickUserToken(c);
+	if (!token) return c.json({ error: 'Service misconfigured' }, 503);
+
 	const client = createBingoDiscordClient({
-		token: c.var.discordToken,
-		userAgent: c.var.discordUserAgent,
+		token,
+		userAgent: BROWSER_USER_AGENT,
 		fetcher: c.var.proxyFetch ?? fetch,
 	});
 

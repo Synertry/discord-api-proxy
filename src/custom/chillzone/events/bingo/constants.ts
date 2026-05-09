@@ -43,10 +43,37 @@ export const CHANNEL_SUPPORTERS = '593126312982609921';
 export const CZBOT_ID = '320731871359008768';
 
 /**
- * Fun-channels live under this Discord category. Children are resolved at
- * request time via {@link resolveFunChannels} and cached per isolate.
+ * Eligible fun channels for sq 25 ("1k+ msgs in all fun channels combined"),
+ * ordered to match ChillZone's sidebar display.
+ *
+ * #counting leads the list because the aggregator reuses its message count
+ * for sq 7 (`counting.total`) - one search call powers both squares.
+ *
+ * The full fun category (627219207246970896) contains 18 channels, but we
+ * exclude:
+ * - #gang-news (553692223259148302) - synertry's user token can't see it
+ * - #mudae (960571084342718525) - temporarily locked, user-token search 403s
+ *
+ * If ChillZone reorganises the category mid-event, update this list.
  */
-export const FUN_CATEGORY_ID = '627219207246970896';
+export const CHANNELS_FUN = [
+	CHANNEL_COUNTING, // #counting (also drives sq 7 via counting.total)
+	'491335575681630238', // #debate
+	'1374809323112501310', // #help-me-choose
+	'1098887351582867536', // #gaming
+	'797895044925227068', // #poketwo
+	'1222304713677209702', // #mudae-ll
+	'584961122537570324', // #qotd
+	'981284416380874812', // #quotes
+	'374752833225883650', // #art
+	'526182568861892618', // #compliment-above
+	'374752900834000896', // #roast-the-person-above
+	'526182495293669376', // #copypastas
+	'974450941434675240', // #music
+	'440684267325095936', // #pets
+	'330248903968686080', // #memes
+	'387008414867521536', // #social-medias
+] as const;
 
 /**
  * Event window. `.t` resets at Monday EOD ChillZone-server time; UTC midnight

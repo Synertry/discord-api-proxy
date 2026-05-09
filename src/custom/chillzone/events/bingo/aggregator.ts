@@ -16,16 +16,9 @@
  * plus one channels-list call on cold-start per isolate.
  */
 
-import {
-	CHANNELS_GENERAL,
-	CHANNEL_COUNTING,
-	CHANNEL_SUPPORTERS,
-	EVENT_END,
-	EVENT_START,
-	EVENT_WEEK1_END,
-} from './constants';
+import { CHANNELS_GENERAL, CHANNEL_COUNTING, CHANNEL_SUPPORTERS, EVENT_END, EVENT_START, EVENT_WEEK1_END } from './constants';
 import { dateToSnowflake } from './snowflake';
-import type { BingoDiscordClient } from './discord-client';
+import { DiscordApiError, type BingoDiscordClient } from './discord-client';
 import type { CountsResult, EventWindow, FunChannelCounts, GeneralWeeklyCounts } from './types';
 
 /** Pre-computed snowflake bounds for the event window. */
@@ -67,22 +60,33 @@ export async function aggregateCounts(client: BingoDiscordClient, userId: string
 		generals[channelId] = { week1, week2 };
 	}
 
-	// 9: counting (sq 7).
-	const countingTotal = await client.countMessages(channelWindowParams(userId, CHANNEL_COUNTING, bounds.startId, bounds.endId));
-
-	// 10: supporters (sq 22).
+	// 9: supporters (sq 22).
 	const supportersTotal = await client.countMessages(channelWindowParams(userId, CHANNEL_SUPPORTERS, bounds.startId, bounds.endId));
 
-	// 11..N: fun-channels expansion + per-channel windows (sq 25).
+	// 10..N: fun-channels expansion + per-channel windows (sq 25).
+	// CHANNELS_FUN includes CHANNEL_COUNTING so the same search call drives
+	// sq 7 (counting.total) and sq 25 (fun.total) - no double-fetch. 403 on a
+	// gated channel is swallowed (treat as zero) so a single locked channel
+	// can't fail the whole /counts response.
 	const funChannelIds = await client.resolveFunChannels();
 	const funByChannel: Record<string, number> = {};
 	let funTotal = 0;
 	for (const channelId of funChannelIds) {
-		const count = await client.countMessages(channelWindowParams(userId, channelId, bounds.startId, bounds.endId));
+		let count = 0;
+		try {
+			count = await client.countMessages(channelWindowParams(userId, channelId, bounds.startId, bounds.endId));
+		} catch (err: unknown) {
+			if (err instanceof DiscordApiError && err.status === 403) {
+				console.warn(`bingo: fun-channel ${channelId} returned 403, treating count as 0`);
+			} else {
+				throw err;
+			}
+		}
 		funByChannel[channelId] = count;
 		funTotal += count;
 	}
 	const fun: FunChannelCounts = { total: funTotal, byChannel: funByChannel };
+	const countingTotal = funByChannel[CHANNEL_COUNTING] ?? 0;
 
 	// Last: lifetime total (sq 18 baseline) - no window, no channel filter.
 	const msgsTotalGuildAllTime = await client.countMessages(new URLSearchParams({ author_id: userId }));
