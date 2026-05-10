@@ -38,7 +38,11 @@ export const CHANNELS_GENERAL = [
 export const CHANNEL_COUNTING = '1220448774803951827';
 export const COUNTING_BOT_ID = '510016054391734273';
 
-/** #supporters channel + czbot ID kept around for the v2 vote-confirmation embed parser. */
+/**
+ * #supporters channel + czbot ID. Sq 22 counts czbot-authored vote-confirmation
+ * embeds that mention the user (`author_id=CZBOT_ID&mentions=user&channel_id=CHANNEL_SUPPORTERS`).
+ * Counting raw user-authored messages here would over-count chitchat.
+ */
 export const CHANNEL_SUPPORTERS = '593126312982609921';
 export const CZBOT_ID = '320731871359008768';
 

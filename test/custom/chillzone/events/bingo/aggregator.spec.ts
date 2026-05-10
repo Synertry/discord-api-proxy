@@ -13,6 +13,7 @@ import {
 	CHANNELS_GENERAL,
 	CHANNEL_COUNTING,
 	CHANNEL_SUPPORTERS,
+	CZBOT_ID,
 	EVENT_END,
 	EVENT_START,
 	EVENT_WEEK1_END,
@@ -89,7 +90,7 @@ function baseBuilder(funChannels: readonly string[] = FUN_CHANNEL_IDS) {
 		.on({ author_id: USER_ID, channel_id: CHANNELS_GENERAL[1], min_id: week1EndId, max_id: endId }, 0)
 		.on({ author_id: USER_ID, channel_id: CHANNELS_GENERAL[2], min_id: startId, max_id: week1EndId }, 0)
 		.on({ author_id: USER_ID, channel_id: CHANNELS_GENERAL[2], min_id: week1EndId, max_id: endId }, 0)
-		.on({ author_id: USER_ID, channel_id: CHANNEL_SUPPORTERS, min_id: startId, max_id: endId }, 0)
+		.on({ author_id: CZBOT_ID, mentions: USER_ID, channel_id: CHANNEL_SUPPORTERS, min_id: startId, max_id: endId }, 0)
 		.on({ author_id: USER_ID }, 0);
 }
 
@@ -104,7 +105,7 @@ describe('aggregateCounts', () => {
 			.on({ author_id: USER_ID, channel_id: CHANNELS_GENERAL[1], min_id: week1EndId, max_id: endId }, 100)
 			.on({ author_id: USER_ID, channel_id: CHANNELS_GENERAL[2], min_id: startId, max_id: week1EndId }, 100)
 			.on({ author_id: USER_ID, channel_id: CHANNELS_GENERAL[2], min_id: week1EndId, max_id: endId }, 100)
-			.on({ author_id: USER_ID, channel_id: CHANNEL_SUPPORTERS, min_id: startId, max_id: endId }, 18)
+			.on({ author_id: CZBOT_ID, mentions: USER_ID, channel_id: CHANNEL_SUPPORTERS, min_id: startId, max_id: endId }, 18)
 			.on({ author_id: USER_ID, channel_id: CHANNEL_COUNTING, min_id: startId, max_id: endId }, 312)
 			.on({ author_id: USER_ID, channel_id: EXTRA_FUN_ID, min_id: startId, max_id: endId }, 50)
 			.on({ author_id: USER_ID }, 489210)
@@ -118,6 +119,20 @@ describe('aggregateCounts', () => {
 		expect(result.msgsTotalGuildAllTime).toBe(489210);
 		expect(result.counting.total).toBe(312);
 		expect(result.supporters.total).toBe(18);
+	});
+
+	it('counts sq 22 supporters as czbot mentions of the user, not user-authored chitchat', async () => {
+		const client = baseBuilder()
+			// User-authored messages in #supporters must NOT influence supporters.total.
+			// The mockClient throws on unexpected calls so wiring `author_id=USER_ID&channel_id=SUPPORTERS`
+			// would surface as a failed test if the aggregator regressed.
+			.on({ author_id: CZBOT_ID, mentions: USER_ID, channel_id: CHANNEL_SUPPORTERS, min_id: startId, max_id: endId }, 30)
+			.on({ author_id: USER_ID, channel_id: CHANNEL_COUNTING, min_id: startId, max_id: endId }, 0)
+			.on({ author_id: USER_ID, channel_id: EXTRA_FUN_ID, min_id: startId, max_id: endId }, 0)
+			.build();
+
+		const result = await aggregateCounts(client, USER_ID);
+		expect(result.supporters.total).toBe(30);
 	});
 
 	it('reuses the fun-loop counting result for sq 7', async () => {
@@ -141,7 +156,7 @@ describe('aggregateCounts', () => {
 			.on({ author_id: USER_ID, channel_id: CHANNELS_GENERAL[1], min_id: week1EndId, max_id: endId }, 300)
 			.on({ author_id: USER_ID, channel_id: CHANNELS_GENERAL[2], min_id: startId, max_id: week1EndId }, 100)
 			.on({ author_id: USER_ID, channel_id: CHANNELS_GENERAL[2], min_id: week1EndId, max_id: endId }, 80)
-			.on({ author_id: USER_ID, channel_id: CHANNEL_SUPPORTERS, min_id: startId, max_id: endId }, 0)
+			.on({ author_id: CZBOT_ID, mentions: USER_ID, channel_id: CHANNEL_SUPPORTERS, min_id: startId, max_id: endId }, 0)
 			.on({ author_id: USER_ID, channel_id: CHANNEL_COUNTING, min_id: startId, max_id: endId }, 0)
 			.on({ author_id: USER_ID, channel_id: EXTRA_FUN_ID, min_id: startId, max_id: endId }, 0)
 			.on({ author_id: USER_ID }, 0)

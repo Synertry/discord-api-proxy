@@ -16,7 +16,7 @@
  * plus one channels-list call on cold-start per isolate.
  */
 
-import { CHANNELS_GENERAL, CHANNEL_COUNTING, CHANNEL_SUPPORTERS, EVENT_END, EVENT_START, EVENT_WEEK1_END } from './constants';
+import { CHANNELS_GENERAL, CHANNEL_COUNTING, CHANNEL_SUPPORTERS, CZBOT_ID, EVENT_END, EVENT_START, EVENT_WEEK1_END } from './constants';
 import { dateToSnowflake } from './snowflake';
 import { DiscordApiError, type BingoDiscordClient } from './discord-client';
 import type { CountsResult, EventWindow, FunChannelCounts, GeneralWeeklyCounts } from './types';
@@ -47,6 +47,25 @@ function channelWindowParams(authorId: string, channelId: string, minId: string,
 }
 
 /**
+ * Search params for sq 22 ("Vote 30 times for CZ in #supporters").
+ *
+ * The valid signal is czbot's vote-confirmation embed which mentions the
+ * voting user. We count those (`author_id=czbot&mentions=user`) rather than
+ * raw user-authored messages in #supporters, which would over-count by any
+ * casual chitchat. Empirically: a known voter who voted 157 times reports
+ * 157 czbot mentions; a non-voter reports 0.
+ */
+function supportersVoteParams(userId: string, minId: string, maxId: string): URLSearchParams {
+	return new URLSearchParams({
+		author_id: CZBOT_ID,
+		mentions: userId,
+		channel_id: CHANNEL_SUPPORTERS,
+		min_id: minId,
+		max_id: maxId,
+	});
+}
+
+/**
  * Aggregates the full /counts result for one user.
  *
  * @param window Optional override; defaults to {@link DEFAULT_EVENT_WINDOW}.
@@ -72,8 +91,8 @@ export async function aggregateCounts(
 		generals[channelId] = { week1, week2 };
 	}
 
-	// 9: supporters (sq 22).
-	const supportersTotal = await client.countMessages(channelWindowParams(userId, CHANNEL_SUPPORTERS, bounds.startId, bounds.endId));
+	// 9: supporters (sq 22) - czbot vote-confirmations mentioning the user.
+	const supportersTotal = await client.countMessages(supportersVoteParams(userId, bounds.startId, bounds.endId));
 
 	// 10..N: fun-channels expansion + per-channel windows (sq 25).
 	// CHANNELS_FUN includes CHANNEL_COUNTING so the same search call drives
