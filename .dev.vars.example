@@ -1,8 +1,19 @@
-# Discord bot token — used for most API calls (prefixed with "Bot " automatically)
+# Discord bot token - used for most API calls (prefixed with "Bot " automatically)
 DISCORD_TOKEN_BOT=
 
-# Discord user token — used for endpoints requiring user-level auth (e.g. guild fetches)
+# Discord user token (default slot) - used for endpoints requiring user-level auth
 DISCORD_TOKEN_USER=
+
+# Optional Discord user token (premium slot) - used when AUTH_KEY_PREMIUM matches.
+# Premium tokens are handpicked accounts with higher access (e.g. server-premium subscriber bits).
+# DISCORD_TOKEN_USER_PREMIUM=
 
 # Shared secret for authenticating incoming requests to this proxy
 AUTH_KEY=
+
+# Optional second auth key paired with DISCORD_TOKEN_USER_PREMIUM
+# AUTH_KEY_PREMIUM=
+
+# Admin auth key for /admin/* endpoints (token registry management).
+# Distinct from AUTH_KEY/AUTH_KEY_PREMIUM. Required to register, list, or revoke pool tokens.
+AUTH_KEY_ADMIN=
