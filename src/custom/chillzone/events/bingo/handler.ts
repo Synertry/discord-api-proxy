@@ -14,41 +14,42 @@
  * - `GET /participant/:userId/counts` - per-window message counts for sq 1, 2, 4, 7, 13, 18, 22, 25
  * - `GET /participant/:userId/roles`  - role-membership snapshot for sq 12, 19
  *
- * The handler relies on the upstream Sieve middleware to inject
- * `discordToken`, `discordUserAgent`, and `proxyFetch` via
- * {@link DiscordContextVariables}; it does not authenticate or
- * pick tokens itself.
+ * v2: bingo runs on the token pool. Per Discord call: acquire from the
+ * `default` pool, fetch with the acquired secret, release. Single retry on
+ * 429 with a fresh acquire if another eligible token exists.
+ *
+ * The pool client comes from `c.var.tokenPoolClient` (set by createApp's
+ * test seam, or constructed lazily from c.env.TOKEN_POOL).
  */
 
 import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
 import type { Context } from 'hono';
 import type { Bindings } from '../../../../types';
 import type { AuthVariables } from '../../../../middleware/auth';
-import { BROWSER_USER_AGENT, type DiscordContextVariables } from '../../../../middleware/discord-context';
+import type { DiscordContextVariables } from '../../../../middleware/discord-context';
+import { createTokenPoolClient, getPoolStub } from '../../../../rotator/client';
+import type { RotatorVariables, TokenPoolClient } from '../../../../rotator/types';
 import { aggregateCounts, DEFAULT_EVENT_WINDOW } from './aggregator';
 import { createBingoDiscordClient, DiscordApiError } from './discord-client';
 import { deriveRoles } from './roles';
 import { bingoCountsQuerySchema, bingoParticipantParamsSchema, countsResponseSchema, errorResponseSchema, rolesResponseSchema } from './schemas';
 import type { EventWindow } from './types';
 
-type Env = { Bindings: Bindings; Variables: DiscordContextVariables & AuthVariables };
+type Env = { Bindings: Bindings; Variables: DiscordContextVariables & AuthVariables & RotatorVariables };
 
 /**
- * ChillZone is a guild where Synertry is a regular member only - the bot has no
- * access. Every bingo Discord call must run through the user token regardless
- * of what the path-based heuristic in `discordContextMiddleware` picked. The
- * `authSlot` set by `authMiddleware` still chooses between default and premium
- * user-token bindings; an unconfigured slot is reported as `null` so the caller
- * can short-circuit with a typed 503.
+ * Resolve the token-pool client for this request. Tests inject one via
+ * `createApp(_, mockTokenPool)`. In production, lazily construct from the
+ * TOKEN_POOL binding. Returns null if the binding is missing - the handler
+ * surfaces that as a 503 misconfiguration.
  */
-function pickUserToken(c: Context<Env>): string | null {
-	const slot = c.var.authSlot;
-	const token = slot === 'premium' ? c.env.DISCORD_TOKEN_USER_PREMIUM : c.env.DISCORD_TOKEN_USER;
-	if (!token) {
-		console.error(`FATAL: bingo route reached but DISCORD_TOKEN_USER${slot === 'premium' ? '_PREMIUM' : ''} is not configured`);
-		return null;
-	}
-	return token;
+function resolvePoolClient(c: Context<Env>): TokenPoolClient | null {
+	if (c.var.tokenPoolClient) return c.var.tokenPoolClient;
+	if (!c.env.TOKEN_POOL) return null;
+	const stub = getPoolStub(c.env);
+	const client = createTokenPoolClient(stub);
+	c.set('tokenPoolClient', client);
+	return client;
 }
 
 const countsRoute = createRoute({
@@ -64,13 +65,17 @@ const countsRoute = createRoute({
 			content: { 'application/json': { schema: errorResponseSchema } },
 			description: 'Invalid userId path parameter',
 		},
+		429: {
+			content: { 'application/json': { schema: errorResponseSchema } },
+			description: 'Token pool fully cooling',
+		},
 		502: {
 			content: { 'application/json': { schema: errorResponseSchema } },
 			description: 'Discord API error',
 		},
 		503: {
 			content: { 'application/json': { schema: errorResponseSchema } },
-			description: 'User token not configured for the auth slot',
+			description: 'Token pool unavailable / misconfigured',
 		},
 	},
 });
@@ -88,13 +93,17 @@ const rolesRoute = createRoute({
 			content: { 'application/json': { schema: errorResponseSchema } },
 			description: 'Invalid userId path parameter',
 		},
+		429: {
+			content: { 'application/json': { schema: errorResponseSchema } },
+			description: 'Token pool fully cooling',
+		},
 		502: {
 			content: { 'application/json': { schema: errorResponseSchema } },
 			description: 'Discord API error',
 		},
 		503: {
 			content: { 'application/json': { schema: errorResponseSchema } },
-			description: 'User token not configured for the auth slot',
+			description: 'Token pool unavailable / misconfigured',
 		},
 	},
 });
@@ -107,6 +116,10 @@ function handleDiscordError(c: Context, err: DiscordApiError) {
 	if (err.status === 404) {
 		return c.json({ error: 'ChillZone resource not found' }, 502);
 	}
+	if (err.status === 429) {
+		// fetchWithRotator threw with status 429 because the pool was unavailable on acquire.
+		return c.json({ error: 'Too Many Requests', retryAfter: null }, 429);
+	}
 	if (err.status === 0) {
 		return c.json({ error: 'Network error talking to Discord' }, 502);
 	}
@@ -118,8 +131,8 @@ export const bingoRoutes = new OpenAPIHono<Env>();
 bingoRoutes.openapi(countsRoute, async (c) => {
 	const { userId } = c.req.valid('param');
 	const query = c.req.valid('query');
-	const token = pickUserToken(c);
-	if (!token) return c.json({ error: 'Service misconfigured' }, 503);
+	const pool = resolvePoolClient(c);
+	if (!pool) return c.json({ error: 'token pool unavailable' }, 503);
 
 	const window: EventWindow =
 		query.start && query.week1End && query.end
@@ -127,8 +140,7 @@ bingoRoutes.openapi(countsRoute, async (c) => {
 			: DEFAULT_EVENT_WINDOW;
 
 	const client = createBingoDiscordClient({
-		token,
-		userAgent: BROWSER_USER_AGENT,
+		pool,
 		fetcher: c.var.proxyFetch ?? fetch,
 	});
 
@@ -146,12 +158,11 @@ bingoRoutes.openapi(countsRoute, async (c) => {
 
 bingoRoutes.openapi(rolesRoute, async (c) => {
 	const { userId } = c.req.valid('param');
-	const token = pickUserToken(c);
-	if (!token) return c.json({ error: 'Service misconfigured' }, 503);
+	const pool = resolvePoolClient(c);
+	if (!pool) return c.json({ error: 'token pool unavailable' }, 503);
 
 	const client = createBingoDiscordClient({
-		token,
-		userAgent: BROWSER_USER_AGENT,
+		pool,
 		fetcher: c.var.proxyFetch ?? fetch,
 	});
 
