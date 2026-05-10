@@ -21,6 +21,32 @@ export const bingoParticipantParamsSchema = z.object({
 	userId: snowflakeSchema,
 });
 
+/**
+ * Optional window-override query parameters for `/counts`.
+ *
+ * All three or none. Useful for stress-testing against historical data while
+ * the bingo event window is still in the future, or for re-running totals
+ * after a CZ-week reorg. Strings must parse as ISO 8601 datetimes (with the
+ * timezone designator) and satisfy `start < week1End < end`.
+ */
+export const bingoCountsQuerySchema = z
+	.object({
+		start: z.string().datetime({ offset: true }).optional(),
+		week1End: z.string().datetime({ offset: true }).optional(),
+		end: z.string().datetime({ offset: true }).optional(),
+	})
+	.refine((q) => (q.start && q.week1End && q.end) || (!q.start && !q.week1End && !q.end), {
+		message: 'start, week1End, and end must all be supplied together or all be omitted',
+	})
+	.refine((q) => !q.start || !q.week1End || new Date(q.start) < new Date(q.week1End), {
+		message: 'start must be earlier than week1End',
+		path: ['week1End'],
+	})
+	.refine((q) => !q.week1End || !q.end || new Date(q.week1End) < new Date(q.end), {
+		message: 'week1End must be earlier than end',
+		path: ['end'],
+	});
+
 const eventWindowSchema = z.object({
 	start: z.string(),
 	week1End: z.string(),

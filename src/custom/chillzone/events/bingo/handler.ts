@@ -25,10 +25,11 @@ import type { Context } from 'hono';
 import type { Bindings } from '../../../../types';
 import type { AuthVariables } from '../../../../middleware/auth';
 import { BROWSER_USER_AGENT, type DiscordContextVariables } from '../../../../middleware/discord-context';
-import { aggregateCounts } from './aggregator';
+import { aggregateCounts, DEFAULT_EVENT_WINDOW } from './aggregator';
 import { createBingoDiscordClient, DiscordApiError } from './discord-client';
 import { deriveRoles } from './roles';
-import { bingoParticipantParamsSchema, countsResponseSchema, errorResponseSchema, rolesResponseSchema } from './schemas';
+import { bingoCountsQuerySchema, bingoParticipantParamsSchema, countsResponseSchema, errorResponseSchema, rolesResponseSchema } from './schemas';
+import type { EventWindow } from './types';
 
 type Env = { Bindings: Bindings; Variables: DiscordContextVariables & AuthVariables };
 
@@ -53,7 +54,7 @@ function pickUserToken(c: Context<Env>): string | null {
 const countsRoute = createRoute({
 	method: 'get',
 	path: '/participant/{userId}/counts',
-	request: { params: bingoParticipantParamsSchema },
+	request: { params: bingoParticipantParamsSchema, query: bingoCountsQuerySchema },
 	responses: {
 		200: {
 			content: { 'application/json': { schema: countsResponseSchema } },
@@ -116,8 +117,14 @@ export const bingoRoutes = new OpenAPIHono<Env>();
 
 bingoRoutes.openapi(countsRoute, async (c) => {
 	const { userId } = c.req.valid('param');
+	const query = c.req.valid('query');
 	const token = pickUserToken(c);
 	if (!token) return c.json({ error: 'Service misconfigured' }, 503);
+
+	const window: EventWindow =
+		query.start && query.week1End && query.end
+			? { start: query.start, week1End: query.week1End, end: query.end }
+			: DEFAULT_EVENT_WINDOW;
 
 	const client = createBingoDiscordClient({
 		token,
@@ -126,7 +133,7 @@ bingoRoutes.openapi(countsRoute, async (c) => {
 	});
 
 	try {
-		const result = await aggregateCounts(client, userId);
+		const result = await aggregateCounts(client, userId, window);
 		return c.json(result, 200);
 	} catch (err: unknown) {
 		if (err instanceof DiscordApiError) {

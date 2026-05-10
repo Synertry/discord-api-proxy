@@ -134,6 +134,35 @@ describe('bingo /participant/:userId/counts', () => {
 		const res = await createTestApp(mockFetch).request('http://localhost/participant/not-a-snowflake/counts', {}, MOCK_ENV);
 		expect(res.status).toBe(400);
 	});
+
+	it('echoes overridden window when start/week1End/end query params are supplied', { timeout: 30_000 }, async () => {
+		const mockFetch = createFetchMock({});
+		const start = '2026-04-01T00:00:00.000Z';
+		const week1End = '2026-04-08T00:00:00.000Z';
+		const end = '2026-04-15T00:00:00.000Z';
+		const url = `http://localhost/participant/${TEST_USER_ID}/counts?start=${encodeURIComponent(start)}&week1End=${encodeURIComponent(week1End)}&end=${encodeURIComponent(end)}`;
+		const res = await createTestApp(mockFetch).request(url, {}, MOCK_ENV);
+		expect(res.status).toBe(200);
+		const body = await res.json();
+		expect(body.window).toEqual({ start, week1End, end });
+	});
+
+	it('rejects partial window override (only start supplied) with 400', async () => {
+		const mockFetch = createFetchMock({});
+		const url = `http://localhost/participant/${TEST_USER_ID}/counts?start=${encodeURIComponent('2026-04-01T00:00:00.000Z')}`;
+		const res = await createTestApp(mockFetch).request(url, {}, MOCK_ENV);
+		expect(res.status).toBe(400);
+	});
+
+	it('rejects window override with start >= end with 400', async () => {
+		const mockFetch = createFetchMock({});
+		const start = '2026-05-15T00:00:00.000Z';
+		const week1End = '2026-05-12T00:00:00.000Z';
+		const end = '2026-05-10T00:00:00.000Z';
+		const url = `http://localhost/participant/${TEST_USER_ID}/counts?start=${encodeURIComponent(start)}&week1End=${encodeURIComponent(week1End)}&end=${encodeURIComponent(end)}`;
+		const res = await createTestApp(mockFetch).request(url, {}, MOCK_ENV);
+		expect(res.status).toBe(400);
+	});
 });
 
 describe('bingo /participant/:userId/roles', () => {

@@ -21,17 +21,19 @@ import { dateToSnowflake } from './snowflake';
 import { DiscordApiError, type BingoDiscordClient } from './discord-client';
 import type { CountsResult, EventWindow, FunChannelCounts, GeneralWeeklyCounts } from './types';
 
-/** Pre-computed snowflake bounds for the event window. */
-function buildBounds(): { startId: string; week1EndId: string; endId: string; window: EventWindow } {
-	const startId = dateToSnowflake(new Date(EVENT_START));
-	const week1EndId = dateToSnowflake(new Date(EVENT_WEEK1_END));
-	const endId = dateToSnowflake(new Date(EVENT_END));
-	return {
-		startId,
-		week1EndId,
-		endId,
-		window: { start: EVENT_START, week1End: EVENT_WEEK1_END, end: EVENT_END },
-	};
+/** Default event window pulled from {@link constants}. */
+export const DEFAULT_EVENT_WINDOW: EventWindow = {
+	start: EVENT_START,
+	week1End: EVENT_WEEK1_END,
+	end: EVENT_END,
+};
+
+/** Pre-computed snowflake bounds for the supplied window. */
+function buildBounds(window: EventWindow): { startId: string; week1EndId: string; endId: string; window: EventWindow } {
+	const startId = dateToSnowflake(new Date(window.start));
+	const week1EndId = dateToSnowflake(new Date(window.week1End));
+	const endId = dateToSnowflake(new Date(window.end));
+	return { startId, week1EndId, endId, window };
 }
 
 /** Search params for a per-author window (no channel filter). */
@@ -44,9 +46,19 @@ function channelWindowParams(authorId: string, channelId: string, minId: string,
 	return new URLSearchParams({ author_id: authorId, channel_id: channelId, min_id: minId, max_id: maxId });
 }
 
-/** Aggregates the full /counts result for one user. */
-export async function aggregateCounts(client: BingoDiscordClient, userId: string): Promise<CountsResult> {
-	const bounds = buildBounds();
+/**
+ * Aggregates the full /counts result for one user.
+ *
+ * @param window Optional override; defaults to {@link DEFAULT_EVENT_WINDOW}.
+ *               Useful for stress-testing against a populated historical
+ *               window while the real event window is still in the future.
+ */
+export async function aggregateCounts(
+	client: BingoDiscordClient,
+	userId: string,
+	window: EventWindow = DEFAULT_EVENT_WINDOW,
+): Promise<CountsResult> {
+	const bounds = buildBounds(window);
 
 	// 1-2: weekly totals (no channel filter) - drive squares 1, 4, 13.
 	const msgsWeek1 = await client.countMessages(authorWindowParams(userId, bounds.startId, bounds.week1EndId));
