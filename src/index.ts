@@ -31,6 +31,7 @@ import { tokenRotatorMiddleware } from './middleware/token-rotator';
 
 import { customRoutes } from './routes/custom';
 import { proxyRoute } from './routes/proxy';
+import { buildAdminRoutes } from './routes/admin';
 
 import type { RotatorVariables, TokenPoolClient } from './rotator/types';
 
@@ -66,6 +67,10 @@ export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolCli
       await next();
     });
   }
+
+  // Admin sub-app at /admin (mounted BEFORE the main sieve so it has its own
+  // auth chain via AUTH_KEY_ADMIN; not exported in the public OpenAPI doc).
+  app.route('/admin', buildAdminRoutes());
 
   // Sieve Layer 1: Rate Limit Interceptor (post-processing)
   // Runs AFTER downstream handlers to intercept 429 responses
