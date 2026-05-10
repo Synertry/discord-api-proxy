@@ -76,22 +76,6 @@ const rateState = { delayMs: START_DELAY_MS, successStreak: 0 };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Strips the Discord API prefix to keep streaming logs grep-friendly. */
-function shortenUrl(url: string): string {
-	return url.startsWith(DISCORD_API_BASE) ? url.slice(DISCORD_API_BASE.length) : url;
-}
-
-/**
- * Streaming structured log for one Discord call. Wrangler dev tail emits each
- * line as it happens, so a `/counts` request prints ~26 lines in real time
- * instead of nothing for ~20s and a single status code at the end.
- *
- * Format keeps the leading `[bingo]` tag for easy `wrangler tail | grep bingo`.
- */
-function logSubrequest(args: { status: number | string; ms: number; retries: number; url: string; outcome: 'ok' | 'retry' | 'fail' }): void {
-	console.log(`[bingo] ${args.outcome.padEnd(5)} ${String(args.status).padEnd(4)} ${String(args.ms).padStart(5)}ms r=${args.retries} ${shortenUrl(args.url)}`);
-}
-
 /**
  * Issues a Discord API GET with adaptive 429 / 5xx handling.
  *
@@ -110,7 +94,6 @@ async function fetchWithRetry(url: string, headers: Headers, fetchFn: typeof fet
 		// Pre-call spacing - keeps a single request under Discord's burst limits.
 		await sleep(rateState.delayMs);
 
-		const t0 = Date.now();
 		let response: Response;
 		try {
 			response = await fetchFn(url, {
@@ -119,23 +102,17 @@ async function fetchWithRetry(url: string, headers: Headers, fetchFn: typeof fet
 				signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 			});
 		} catch (err: unknown) {
-			const ms = Date.now() - t0;
-			const message = err instanceof Error ? err.message : String(err);
 			if (attempt >= MAX_RETRIES) {
-				logSubrequest({ status: `NET:${message.slice(0, 20)}`, ms, retries: attempt, url, outcome: 'fail' });
+				const message = err instanceof Error ? err.message : String(err);
 				throw new DiscordApiError(0, `Network error after ${attempt} retries: ${message}`);
 			}
-			logSubrequest({ status: `NET:${message.slice(0, 20)}`, ms, retries: attempt, url, outcome: 'retry' });
 			rateState.delayMs = Math.min(rateState.delayMs * BACKOFF_FACTOR, MAX_DELAY_MS);
 			rateState.successStreak = 0;
 			attempt += 1;
 			continue;
 		}
 
-		const ms = Date.now() - t0;
-
 		if (response.ok) {
-			logSubrequest({ status: response.status, ms, retries: attempt, url, outcome: 'ok' });
 			rateState.successStreak += 1;
 			if (rateState.successStreak >= DECAY_STREAK) {
 				rateState.delayMs = Math.max(rateState.delayMs * DECAY_FACTOR, MIN_DELAY_MS);
@@ -146,12 +123,10 @@ async function fetchWithRetry(url: string, headers: Headers, fetchFn: typeof fet
 
 		const transient = response.status === 429 || (response.status >= 500 && response.status <= 599);
 		if (!transient || attempt >= MAX_RETRIES) {
-			logSubrequest({ status: response.status, ms, retries: attempt, url, outcome: 'fail' });
 			const body = await response.text();
 			throw new DiscordApiError(response.status, body);
 		}
 
-		logSubrequest({ status: response.status, ms, retries: attempt, url, outcome: 'retry' });
 		const retryAfterHeader = response.headers.get('retry-after');
 		const retryAfterMs = retryAfterHeader ? Math.max(0, parseFloat(retryAfterHeader) * 1000) : 0;
 

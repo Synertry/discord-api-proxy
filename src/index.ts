@@ -26,6 +26,7 @@ import type { DiscordContextVariables } from './middleware/discord-context';
 import { authMiddleware } from './middleware/auth';
 import { discordContextMiddleware } from './middleware/discord-context';
 import { snowflakeValidatorMiddleware } from './middleware/snowflake-validator';
+import { subrequestLoggerMiddleware } from './middleware/subrequest-logger';
 
 import { customRoutes } from './routes/custom';
 import { proxyRoute } from './routes/proxy';
@@ -93,6 +94,10 @@ export function createApp(mockFetch?: typeof fetch) {
 
   // Sieve Layer 4: Snowflake Validation (Discord ID format checks)
   app.use('*', snowflakeValidatorMiddleware);
+
+  // Sieve Layer 4.5: Subrequest Logger (wraps proxyFetch for streaming visibility)
+  // Sits below auth/snowflake so unauthenticated traffic doesn't generate noise.
+  app.use('*', subrequestLoggerMiddleware);
 
   // Sieve Layer 5: Custom Business Logic Routes (mounted under /custom)
   app.route('/custom', customRoutes);
