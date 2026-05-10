@@ -19,6 +19,7 @@
  */
 
 import { OpenAPIHono } from '@hono/zod-openapi';
+import { DurableObject } from 'cloudflare:workers';
 import type { Bindings } from './types';
 import type { AuthVariables } from './middleware/auth';
 import type { DiscordContextVariables } from './middleware/discord-context';
@@ -30,6 +31,16 @@ import { subrequestLoggerMiddleware } from './middleware/subrequest-logger';
 
 import { customRoutes } from './routes/custom';
 import { proxyRoute } from './routes/proxy';
+
+/**
+ * Token pool Durable Object.
+ *
+ * Skeleton: holds N Discord user tokens with per-Discord-bucket cooldowns.
+ * Full RPC interface (`acquire`, `release`, `register`, etc.) lands in
+ * `src/rotator/do.ts` in a follow-up commit; this stub exists only so the
+ * `wrangler.jsonc` binding resolves at runtime and miniflare can boot.
+ */
+export class TokenPoolDO extends DurableObject<Bindings> {}
 
 /**
  * Creates and configures the Hono application with all middleware and routes.
