@@ -71,7 +71,6 @@ export const countsResponseSchema = z.object({
 	msgsTotal: z.number(),
 	msgsTotalGuildAllTime: z.number(),
 	generals: z.record(z.string(), generalWeeklyCountsSchema),
-	counting: z.object({ total: z.number() }),
 	supporters: z.object({ total: z.number() }),
 	fun: funChannelCountsSchema,
 });

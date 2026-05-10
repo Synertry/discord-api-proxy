@@ -34,7 +34,15 @@ export const CHANNELS_GENERAL = [
 	'701205521071341578', // gen3
 ] as const;
 
-/** #counting channel + bot ID kept around for the v2 valid-count check (white_check_mark react). */
+/**
+ * #counting channel + counting bot ID. Sq 7 (valid counts) cannot be served
+ * from this proxy: synertry's user-token returns 50001 Missing Access on
+ * `/channels/COUNTING/messages*` endpoints, search omits reactions, and the
+ * bot isn't in CZ. The gateway-listener codebase owns sq 7 by subscribing
+ * to MESSAGE_REACTION_ADD events from {@link COUNTING_BOT_ID}. This proxy
+ * still includes #counting in {@link CHANNELS_FUN} so its raw traffic
+ * contributes to sq 25's fun.total.
+ */
 export const CHANNEL_COUNTING = '1220448774803951827';
 export const COUNTING_BOT_ID = '510016054391734273';
 

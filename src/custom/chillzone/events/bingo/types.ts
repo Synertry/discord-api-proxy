@@ -51,7 +51,16 @@ export interface FunChannelCounts {
 	byChannel: Record<string, number>;
 }
 
-/** Aggregate counts result returned by the `/counts` endpoint. */
+/**
+ * Aggregate counts result returned by the `/counts` endpoint.
+ *
+ * Sq 7 (#counting validity) is intentionally absent: Discord's REST API
+ * blocks individual-message reads on #counting for synertry's user token
+ * (50001 Missing Access), and `total_results` from search omits reactions,
+ * so we cannot verify the counting bot's ✅ here. The gateway-listener
+ * codebase owns sq 7. The raw #counting traffic still feeds sq 25 through
+ * `fun.byChannel[CHANNEL_COUNTING]`.
+ */
 export interface CountsResult {
 	userId: string;
 	window: EventWindow;
@@ -60,7 +69,6 @@ export interface CountsResult {
 	msgsTotal: number;
 	msgsTotalGuildAllTime: number;
 	generals: Record<string, GeneralWeeklyCounts>;
-	counting: { total: number };
 	supporters: { total: number };
 	fun: FunChannelCounts;
 }

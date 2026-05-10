@@ -120,8 +120,8 @@ describe('bingo /participant/:userId/counts', () => {
 		expect(body.msgsWeek2).toBe(5000);
 		expect(body.msgsTotal).toBe(10000);
 		expect(body.msgsTotalGuildAllTime).toBe(489210);
-		expect(body.counting.total).toBe(312);
 		expect(body.supporters.total).toBe(18);
+		expect(body).not.toHaveProperty('counting');
 		// Counting matcher returns 312; every other fun channel falls through to 1.
 		expect(body.fun.total).toBe(312 + (CHANNELS_FUN.length - 1));
 		expect(body.fun.byChannel[CHANNEL_COUNTING]).toBe(312);

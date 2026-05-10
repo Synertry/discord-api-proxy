@@ -117,7 +117,7 @@ describe('aggregateCounts', () => {
 		expect(result.msgsWeek2).toBe(7000);
 		expect(result.msgsTotal).toBe(12000);
 		expect(result.msgsTotalGuildAllTime).toBe(489210);
-		expect(result.counting.total).toBe(312);
+		expect(result.fun.byChannel[CHANNEL_COUNTING]).toBe(312);
 		expect(result.supporters.total).toBe(18);
 	});
 
@@ -135,15 +135,15 @@ describe('aggregateCounts', () => {
 		expect(result.supporters.total).toBe(30);
 	});
 
-	it('reuses the fun-loop counting result for sq 7', async () => {
+	it('still includes #counting in fun.byChannel even though sq 7 is no longer surfaced', async () => {
 		const client = baseBuilder()
 			.on({ author_id: USER_ID, channel_id: CHANNEL_COUNTING, min_id: startId, max_id: endId }, 999)
 			.on({ author_id: USER_ID, channel_id: EXTRA_FUN_ID, min_id: startId, max_id: endId }, 0)
 			.build();
 
 		const result = await aggregateCounts(client, USER_ID);
-		expect(result.counting.total).toBe(999);
 		expect(result.fun.byChannel[CHANNEL_COUNTING]).toBe(999);
+		expect(result).not.toHaveProperty('counting');
 	});
 
 	it('builds per-general weekly buckets keyed by channel id', async () => {
@@ -194,7 +194,6 @@ describe('aggregateCounts', () => {
 		expect(result.fun.byChannel[CHANNEL_COUNTING]).toBe(0);
 		expect(result.fun.byChannel[EXTRA_FUN_ID]).toBe(99);
 		expect(result.fun.total).toBe(99);
-		expect(result.counting.total).toBe(0);
 	});
 
 	it('propagates non-403 errors from the fun loop', async () => {

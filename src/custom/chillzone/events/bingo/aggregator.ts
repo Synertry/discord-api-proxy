@@ -16,7 +16,7 @@
  * plus one channels-list call on cold-start per isolate.
  */
 
-import { CHANNELS_GENERAL, CHANNEL_COUNTING, CHANNEL_SUPPORTERS, CZBOT_ID, EVENT_END, EVENT_START, EVENT_WEEK1_END } from './constants';
+import { CHANNELS_GENERAL, CHANNEL_SUPPORTERS, CZBOT_ID, EVENT_END, EVENT_START, EVENT_WEEK1_END } from './constants';
 import { dateToSnowflake } from './snowflake';
 import { DiscordApiError, type BingoDiscordClient } from './discord-client';
 import type { CountsResult, EventWindow, FunChannelCounts, GeneralWeeklyCounts } from './types';
@@ -95,10 +95,11 @@ export async function aggregateCounts(
 	const supportersTotal = await client.countMessages(supportersVoteParams(userId, bounds.startId, bounds.endId));
 
 	// 10..N: fun-channels expansion + per-channel windows (sq 25).
-	// CHANNELS_FUN includes CHANNEL_COUNTING so the same search call drives
-	// sq 7 (counting.total) and sq 25 (fun.total) - no double-fetch. 403 on a
-	// gated channel is swallowed (treat as zero) so a single locked channel
-	// can't fail the whole /counts response.
+	// CHANNELS_FUN includes CHANNEL_COUNTING - the raw #counting traffic
+	// still flows into fun.total / fun.byChannel even though sq 7 itself
+	// is owned by the gateway listener (we can't read reactions here). 403
+	// on a gated channel is swallowed (treat as zero) so a single locked
+	// channel can't fail the whole /counts response.
 	const funChannelIds = await client.resolveFunChannels();
 	const funByChannel: Record<string, number> = {};
 	let funTotal = 0;
@@ -117,7 +118,6 @@ export async function aggregateCounts(
 		funTotal += count;
 	}
 	const fun: FunChannelCounts = { total: funTotal, byChannel: funByChannel };
-	const countingTotal = funByChannel[CHANNEL_COUNTING] ?? 0;
 
 	// Last: lifetime total (sq 18 baseline) - no window, no channel filter.
 	const msgsTotalGuildAllTime = await client.countMessages(new URLSearchParams({ author_id: userId }));
@@ -130,7 +130,6 @@ export async function aggregateCounts(
 		msgsTotal: msgsWeek1 + msgsWeek2,
 		msgsTotalGuildAllTime,
 		generals,
-		counting: { total: countingTotal },
 		supporters: { total: supportersTotal },
 		fun,
 	};
