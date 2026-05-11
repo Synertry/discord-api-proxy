@@ -26,6 +26,10 @@ export type Bindings = {
   AUTH_KEY: string;
   /** Optional second auth key. Requests authenticated with this key are routed to `DISCORD_TOKEN_USER_PREMIUM` for user-context calls. */
   AUTH_KEY_PREMIUM?: string;
+  /** Admin auth key for `/admin/*` endpoints (token registry management). Distinct from `AUTH_KEY` and `AUTH_KEY_PREMIUM`. */
+  AUTH_KEY_ADMIN?: string;
+  /** Durable Object namespace for the token pool rotator. */
+  TOKEN_POOL: DurableObjectNamespace;
 };
 
 /**

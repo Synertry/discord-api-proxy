@@ -14,7 +14,7 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "discord-api-proxy",
 	"main": "src/index.ts",
-	"compatibility_date": "2026-04-19",
+	"compatibility_date": "2026-05-03",
 	"routes": [
 		{
 			"pattern": "__CUSTOM_DOMAIN__",
@@ -28,8 +28,23 @@
 	"observability": {
 		"enabled": true
 	},
+	"send_metrics": false,
 	"compatibility_flags": [
 		"nodejs_compat"
+	],
+	/**
+	 * Durable Objects — token pool rotator.
+	 * The TokenPoolDO class is exported from `src/index.ts` and stores N user
+	 * tokens with per-Discord-bucket cooldowns. Cross-codebase consumers add a
+	 * binding with `"script_name": "discord-api-proxy"` to reach this DO.
+	 */
+	"durable_objects": {
+		"bindings": [
+			{ "name": "TOKEN_POOL", "class_name": "TokenPoolDO" }
+		]
+	},
+	"migrations": [
+		{ "tag": "v1", "new_sqlite_classes": ["TokenPoolDO"] }
 	]
 	/**
 	 * Smart Placement

@@ -27,9 +27,16 @@ import { authMiddleware } from './middleware/auth';
 import { discordContextMiddleware } from './middleware/discord-context';
 import { snowflakeValidatorMiddleware } from './middleware/snowflake-validator';
 import { subrequestLoggerMiddleware } from './middleware/subrequest-logger';
+import { tokenRotatorMiddleware } from './middleware/token-rotator';
 
 import { customRoutes } from './routes/custom';
 import { proxyRoute } from './routes/proxy';
+import { buildAdminRoutes } from './routes/admin';
+
+import type { RotatorVariables, TokenPoolClient } from './rotator/types';
+
+// Re-export Durable Object class for the wrangler binding to discover.
+export { TokenPoolDO } from './rotator/do';
 
 /**
  * Creates and configures the Hono application with all middleware and routes.
@@ -43,18 +50,27 @@ import { proxyRoute } from './routes/proxy';
  * 6. **Proxy forwarder** — Catch-all that forwards to Discord API
  *
  * @param mockFetch - Optional fetch override for integration tests.
+ * @param mockTokenPool - Optional in-memory TokenPoolClient for tests; bypasses the real DO.
  * @returns Configured Hono app instance.
  */
-export function createApp(mockFetch?: typeof fetch) {
-  const app = new OpenAPIHono<{ Bindings: Bindings; Variables: DiscordContextVariables & AuthVariables }>();
+export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolClient) {
+  const app = new OpenAPIHono<{
+    Bindings: Bindings;
+    Variables: DiscordContextVariables & AuthVariables & RotatorVariables;
+  }>();
 
-  // Inject mock fetch for testing — makes it available via c.var.proxyFetch
-  if (mockFetch) {
+  // Inject mock fetch and/or token-pool client for testing
+  if (mockFetch || mockTokenPool) {
     app.use('*', async (c, next) => {
-      c.set('proxyFetch', mockFetch);
+      if (mockFetch) c.set('proxyFetch', mockFetch);
+      if (mockTokenPool) c.set('tokenPoolClient', mockTokenPool);
       await next();
     });
   }
+
+  // Admin sub-app at /admin (mounted BEFORE the main sieve so it has its own
+  // auth chain via AUTH_KEY_ADMIN; not exported in the public OpenAPI doc).
+  app.route('/admin', buildAdminRoutes());
 
   // Sieve Layer 1: Rate Limit Interceptor (post-processing)
   // Runs AFTER downstream handlers to intercept 429 responses
@@ -91,6 +107,12 @@ export function createApp(mockFetch?: typeof fetch) {
 
   // Sieve Layer 3: Context Parsing (token selection + user-agent)
   app.use('*', discordContextMiddleware);
+
+  // Sieve Layer 3.5: Token-pool rotator (acquire on rotatable paths)
+  // Runs after discord-context so c.var.discordToken has a static-token
+  // fallback in place; runs before snowflake-validator so an invalid path
+  // never costs us a token acquisition.
+  app.use('*', tokenRotatorMiddleware);
 
   // Sieve Layer 4: Snowflake Validation (Discord ID format checks)
   app.use('*', snowflakeValidatorMiddleware);

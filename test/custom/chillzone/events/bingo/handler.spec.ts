@@ -28,6 +28,7 @@ import {
 } from '../../../../../src/custom/chillzone/events/bingo/constants';
 import type { Bindings } from '../../../../../src/types';
 import type { DiscordContextVariables } from '../../../../../src/middleware/discord-context';
+import type { RotatorVariables, TokenPoolClient } from '../../../../../src/rotator/types';
 
 const TEST_USER_ID = '100000000000000001';
 const NEEDS_MEMBER_ID = '100000000000000002';
@@ -36,7 +37,26 @@ const MOCK_ENV: Bindings = {
 	AUTH_KEY: 'secret-key',
 	DISCORD_TOKEN_BOT: 'bot-token',
 	DISCORD_TOKEN_USER: 'user-token',
+	TOKEN_POOL: {} as DurableObjectNamespace,
 };
+
+/**
+ * Mock TokenPoolClient that always succeeds with a static token. Counts
+ * acquire/release calls so individual tests can assert the number of pool
+ * interactions if they want.
+ */
+function makeMockPool(): TokenPoolClient {
+	let n = 0;
+	return {
+		acquire: vi.fn(async () => ({
+			ok: true as const,
+			label: 'test-tok',
+			tokenSecret: 'POOLED_USER_TOKEN',
+			requestId: `req-${n++}`,
+		})),
+		release: vi.fn(async () => {}),
+	};
+}
 
 /** Builds a JSON Response with the given body. */
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
@@ -79,13 +99,12 @@ function createFetchMock(opts: {
 	}) as unknown as typeof fetch;
 }
 
-/** Wraps the handler routes with a middleware that injects the Discord context. */
-function createTestApp(mockFetch: typeof fetch) {
-	const app = new OpenAPIHono<{ Bindings: Bindings; Variables: DiscordContextVariables }>();
+/** Wraps the handler routes with a middleware that injects the proxyFetch + tokenPoolClient. */
+function createTestApp(mockFetch: typeof fetch, pool: TokenPoolClient = makeMockPool()) {
+	const app = new OpenAPIHono<{ Bindings: Bindings; Variables: DiscordContextVariables & RotatorVariables }>();
 	app.use('*', async (c, next) => {
-		c.set('discordToken', c.env.DISCORD_TOKEN_USER);
-		c.set('discordUserAgent', 'TestUA/1.0');
 		c.set('proxyFetch', mockFetch);
+		c.set('tokenPoolClient', pool);
 		await next();
 	});
 	app.route('/', bingoRoutes);
@@ -97,8 +116,8 @@ beforeEach(() => {
 });
 
 describe('bingo /participant/:userId/counts', () => {
-	// Counts hits ~26 mocked Discord calls; the in-worker fetchWithRetry pre-call
-	// floor (250ms) means wall-clock ~6.5s. Default vitest timeout is 5s.
+	// Counts hits ~26 mocked Discord calls; the token-pool rotator owns rate-limit
+	// response now so we no longer pay a per-call sleep. Timeout is generous padding.
 	it('returns the aggregated counts shape for a valid user', { timeout: 30_000 }, async () => {
 		const mockFetch = createFetchMock({
 			searchOverrides: [
