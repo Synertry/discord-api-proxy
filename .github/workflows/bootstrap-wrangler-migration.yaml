@@ -1,0 +1,105 @@
+name: Bootstrap Wrangler Migration
+
+# Non-versioned wrangler deploy. Used only when the standard versioned pipeline
+# (.github/workflows/deploy.yaml) cannot apply a Worker migration - e.g. the first
+# deploy that introduces a new Durable Object class, or any future migration that
+# Cloudflare refuses to ship through `wrangler versions upload`.
+#
+# Run from the Actions tab: select this workflow, click "Run workflow", target the
+# `production` branch (default). Future versioned deploys resume working on the
+# next push to `production` once the migration is applied on the account.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to deploy (branch, tag, or SHA). Defaults to production.'
+        required: false
+        default: 'production'
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    name: Bootstrap migration via wrangler deploy
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '22'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: latest
+
+      - name: Restore bun cache and node_modules
+        id: cache
+        uses: actions/cache/restore@v5.0.5
+        with:
+          path: |
+            ~/.cache/bun
+            node_modules
+          key: cache-${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bun install
+
+      - name: Save bun cache and node_modules
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5.0.5
+        with:
+          path: |
+            ~/.cache/bun
+            node_modules
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Generate Cloudflare Worker types
+        run: node ./node_modules/wrangler/bin/wrangler.js types --env-interface CloudflareBindings
+
+      - name: Inject custom domain
+        run: |
+          if [ -z "${{ secrets.CUSTOM_DOMAIN }}" ]; then
+            echo "::error::CUSTOM_DOMAIN secret is not set"
+            exit 1
+          fi
+
+          sed -i \
+            -e "s/__CUSTOM_DOMAIN__/${{ secrets.CUSTOM_DOMAIN }}/g" \
+            wrangler.jsonc
+
+      - name: Set Build Metadata
+        run: |
+          sed -i \
+            -e "s/__BUILD_HASH__/${{ github.sha }}/g" \
+            -e "s/__BUILD_TIMESTAMP__/${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}/g" \
+            wrangler.jsonc
+
+      - name: Deploy (non-versioned) to apply migration
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -e
+          set -o pipefail
+
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
+          COMMIT_TITLE=$(git log -1 --format=%s 2>/dev/null || echo "")
+          if [ -z "$COMMIT_TITLE" ]; then
+            COMMIT_TITLE="Bootstrap Migration"
+          fi
+          SAFE_TITLE=$(echo "$COMMIT_TITLE" | sed "s/[\"'\`]//g")
+          DEPLOY_MSG="bootstrap: ${SAFE_TITLE:0:38}"
+
+          echo "Message: $DEPLOY_MSG"
+          echo "Tag: $SHORT_SHA"
+          echo "Ref: ${{ inputs.ref }}"
+
+          echo "Deploying (non-versioned, applies any pending Worker migration)..."
+          node ./node_modules/wrangler/bin/wrangler.js deploy \
+            --message "$DEPLOY_MSG"
