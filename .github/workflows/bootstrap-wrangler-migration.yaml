@@ -74,9 +74,14 @@ jobs:
 
       - name: Set Build Metadata
         run: |
+          # Normalize the commit timestamp to UTC ISO-8601 with `Z` suffix so
+          # the /healthcheck `build.timestamp` matches the format of `time`
+          # (see deploy.yaml for full rationale).
+          RAW_TS="${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}"
+          BUILD_TS_UTC=$(date -u -d "$RAW_TS" +%Y-%m-%dT%H:%M:%SZ)
           sed -i \
             -e "s/__BUILD_HASH__/${{ github.sha }}/g" \
-            -e "s/__BUILD_TIMESTAMP__/${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}/g" \
+            -e "s|__BUILD_TIMESTAMP__|$BUILD_TS_UTC|g" \
             wrangler.jsonc
 
       - name: Deploy (non-versioned) to apply migration

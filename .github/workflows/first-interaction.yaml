@@ -15,6 +15,19 @@ jobs:
   check_for_first_interaction:
     name: Greet First-Time Contributors
     runs-on: ubuntu-latest
+    # `actions/first-interaction@v3.x` ships a buggy `isFirstPullRequest` that
+    # lists ALL repo PRs without filtering by author and only checks numeric
+    # ordering - so for any repo owner who has never filed an Issue, the gate
+    # always evaluates as "first contribution" and the greeting fires on every
+    # PR. Gate the job up-front by `author_association` instead. Only
+    # FIRST_TIME_CONTRIBUTOR and FIRST_TIMER should ever receive the greeting.
+    if: >-
+      (github.event_name == 'pull_request' &&
+        contains(fromJSON('["FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER"]'),
+                 github.event.pull_request.author_association)) ||
+      (github.event_name == 'issues' &&
+        contains(fromJSON('["FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER"]'),
+                 github.event.issue.author_association))
     steps:
       - uses: actions/first-interaction@v3.1.0
         with:
