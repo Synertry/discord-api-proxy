@@ -14,7 +14,7 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "discord-api-proxy",
 	"main": "src/index.ts",
-	"compatibility_date": "2026-05-03",
+	"compatibility_date": "2026-05-14",
 	"routes": [
 		{
 			"pattern": "__CUSTOM_DOMAIN__",
@@ -26,7 +26,13 @@
 		"BUILD_TIMESTAMP": "'__BUILD_TIMESTAMP__'"
 	},
 	"observability": {
-		"enabled": true
+		"logs": {
+			"enabled": true,
+			"invocation_logs": true
+		},
+		"traces": {
+			"enabled": false
+		}
 	},
 	"send_metrics": false,
 	"compatibility_flags": [
