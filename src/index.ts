@@ -32,6 +32,7 @@ import { tokenRotatorMiddleware } from './middleware/token-rotator';
 import { customRoutes } from './routes/custom';
 import { proxyRoute } from './routes/proxy';
 import { buildAdminRoutes } from './routes/admin';
+import { buildHealthcheckRoute } from './routes/healthcheck';
 
 import type { RotatorVariables, TokenPoolClient } from './rotator/types';
 
@@ -67,6 +68,12 @@ export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolCli
       await next();
     });
   }
+
+  // Public healthcheck at /healthcheck (mounted BEFORE the sieve so it is
+  // reachable without an auth key - phone browsers, status pages, uptime
+  // monitors). Liveness only; does not probe the DO or Discord. NOT in the
+  // public OpenAPI doc.
+  app.route('/healthcheck', buildHealthcheckRoute());
 
   // Admin sub-app at /admin (mounted BEFORE the main sieve so it has its own
   // auth chain via AUTH_KEY_ADMIN; not exported in the public OpenAPI doc).
