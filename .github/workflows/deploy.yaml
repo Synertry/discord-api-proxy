@@ -60,9 +60,13 @@ jobs:
 
       - name: Set Build Metadata
         run: |
+          # Normalize the commit timestamp to UTC ISO-8601 with `Z` suffix so
+          # the /healthcheck `build.timestamp` matches the format of `time`
+          # (instead of leaking the committer's local TZ offset).
+          BUILD_TS_UTC=$(date -u -d "${{ github.event.head_commit.timestamp }}" +%Y-%m-%dT%H:%M:%SZ)
           sed -i \
             -e "s/__BUILD_HASH__/${{ github.sha }}/g" \
-            -e "s/__BUILD_TIMESTAMP__/${{ github.event.head_commit.timestamp }}/g" \
+            -e "s|__BUILD_TIMESTAMP__|$BUILD_TS_UTC|g" \
             wrangler.jsonc
 
       - name: Deploy to Cloudflare
