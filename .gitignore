@@ -353,3 +353,6 @@ worker-configuration.d.ts
 
 # We are using bun with bun.lock
 package-lock.json
+
+# Local artifacts
+output/

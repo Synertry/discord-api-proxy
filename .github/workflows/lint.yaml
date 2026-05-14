@@ -20,11 +20,6 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6.4.0
-        with:
-          node-version: '22'
-
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2.2.0
         with:
@@ -53,7 +48,7 @@ jobs:
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Generate Cloudflare Worker types
-        run: node ./node_modules/wrangler/bin/wrangler.js types --env-interface CloudflareBindings
+        run: bun run cf-typegen
 
       - name: Type Check & Lint
         run: bun run lint

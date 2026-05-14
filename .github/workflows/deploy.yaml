@@ -12,11 +12,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6.4.0
-        with:
-          node-version: '22'
-
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2.2.0
         with:
@@ -45,7 +40,7 @@ jobs:
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Generate Cloudflare Worker types
-        run: node ./node_modules/wrangler/bin/wrangler.js types --env-interface CloudflareBindings
+        run: bun run cf-typegen
 
       - name: Inject custom domain
         run: |
@@ -98,15 +93,20 @@ jobs:
           echo "🔖 Tag: $SHORT_SHA"
 
           # --- 2. UPLOAD ---
+          # `bun --bun ./node_modules/wrangler/bin/wrangler.js` bypasses the
+          # node-shebang shim at node_modules/.bin/wrangler AND forces Bun's
+          # runtime (process.versions.node = 24.3.0 under Bun 1.3.14), which
+          # passes wrangler 4.91's >=22 startup check. `bunx wrangler` would
+          # still honor the shebang on Linux and route to system Node 20.20.2.
           echo "🚀 Uploading..."
-          node ./node_modules/wrangler/bin/wrangler.js versions upload \
+          bun --bun ./node_modules/wrangler/bin/wrangler.js versions upload \
             --message "$DEPLOY_MSG" \
             --tag "$SHORT_SHA"
 
           # --- 3. RETRIEVE ID ---
           echo "🔍 verifying upload..."
           # Filter specifically by our tag
-          VERSION_ID=$(node ./node_modules/wrangler/bin/wrangler.js versions list --json | jq -r --arg tag "$SHORT_SHA" '.[] | select(.annotations["workers/tag"] == $tag) | .id')
+          VERSION_ID=$(bun --bun ./node_modules/wrangler/bin/wrangler.js versions list --json | jq -r --arg tag "$SHORT_SHA" '.[] | select(.annotations["workers/tag"] == $tag) | .id')
 
           if [ -z "$VERSION_ID" ] || [ "$VERSION_ID" == "null" ]; then
             echo "::error::Version ID not found for tag $SHORT_SHA"
@@ -117,6 +117,6 @@ jobs:
 
           # --- 4. PROMOTE ---
           echo "🚢 Promoting to live..."
-          node ./node_modules/wrangler/bin/wrangler.js versions deploy "$VERSION_ID" \
+          bun --bun ./node_modules/wrangler/bin/wrangler.js versions deploy "$VERSION_ID" \
             --message "$DEPLOY_MSG" \
             --yes

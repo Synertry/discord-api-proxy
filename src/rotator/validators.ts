@@ -13,7 +13,23 @@
 
 import type { RegisterInput, Slot, TokenState } from './types';
 
-/** Hard cap on tokens per slot. Bounds blast radius if storage leaks. */
+/**
+ * Hard cap on tokens per slot. Three independent reasons, none of which are
+ * about per-IP rate limits (a Cloudflare Worker's outbound fetches egress
+ * across many anycast IPs, not a single one - per-IP throttling on the Discord
+ * side is therefore not a concentrated risk for one Worker, it is diffused):
+ *
+ *   1) DO storage blast radius / operator-error guard. Every register writes
+ *      a token to ctx.storage; a runaway paste loop could spew hundreds.
+ *   2) Acquire scan is O(N). The DO single-thread filters + sorts every token
+ *      on every acquire. At 20 this is sub-millisecond; at 200 it starts
+ *      mattering inside the serialized event loop.
+ *   3) Practical sufficiency. Discord per-token-per-bucket is typically 5/5s;
+ *      20 tokens * 5/5s = ~20 req/s on a single rotatable route. Bingo /counts
+ *      (12-15 sub-requests) finishes inside one bucket window even at pool=2.
+ *
+ * One-line bump if a real need shows up.
+ */
 export const POOL_SIZE_CAP_PER_SLOT = 20;
 
 /** LRU eviction cap on per-token bucket entries. */

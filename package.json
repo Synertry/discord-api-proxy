@@ -25,19 +25,19 @@
 		"lint": "tsc --noEmit",
 		"test": "vitest",
 		"dev": "wrangler dev",
-		"cf-typegen": "wrangler types --env-interface CloudflareBindings"
+		"cf-typegen": "bun --bun ./node_modules/wrangler/bin/wrangler.js types --env-interface CloudflareBindings"
 	},
 	"dependencies": {
 		"@hono/swagger-ui": "^0.6.1",
-		"@hono/zod-openapi": "^1.3.0",
+		"@hono/zod-openapi": "^1.4.0",
 		"hono": "^4.12.18",
-		"yaml": "^2.8.4"
+		"yaml": "^2.9.0"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.16.3",
-		"@types/node": "^25.6.2",
+		"@cloudflare/vitest-pool-workers": "^0.16.5",
+		"@types/node": "^25.8.0",
 		"typescript": "^6.0.3",
 		"vitest": "^4.1.6",
-		"wrangler": "^4.90.0"
+		"wrangler": "^4.91.0"
 	}
 }
