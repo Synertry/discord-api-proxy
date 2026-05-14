@@ -25,7 +25,7 @@
 		"lint": "tsc --noEmit",
 		"test": "vitest",
 		"dev": "wrangler dev",
-		"cf-typegen": "bun --bun ./node_modules/wrangler/bin/wrangler.js types --env-interface CloudflareBindings"
+		"cf-typegen": "wrangler types --env-interface CloudflareBindings"
 	},
 	"dependencies": {
 		"@hono/swagger-ui": "^0.6.1",

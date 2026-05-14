@@ -26,6 +26,11 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '22'
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2.2.0
         with:
@@ -54,7 +59,7 @@ jobs:
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Generate Cloudflare Worker types
-        run: bun run cf-typegen
+        run: node ./node_modules/wrangler/bin/wrangler.js types --env-interface CloudflareBindings
 
       - name: Inject custom domain
         run: |
@@ -96,8 +101,7 @@ jobs:
           echo "Ref: ${{ inputs.ref }}"
 
           echo "Deploying (non-versioned, applies any pending Worker migration)..."
-          # `bun --bun ./node_modules/wrangler/bin/wrangler.js` bypasses the
-          # node-shebang shim AND forces Bun runtime; see deploy.yaml for the
-          # full rationale.
-          bun --bun ./node_modules/wrangler/bin/wrangler.js deploy \
+          # Use real Node from setup-node; see deploy.yaml comment for why
+          # `bun --bun` silently breaks `wrangler versions upload` / `deploy`.
+          node ./node_modules/wrangler/bin/wrangler.js deploy \
             --message "$DEPLOY_MSG"
