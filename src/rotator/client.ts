@@ -20,8 +20,17 @@
  * shift to per-slot or per-route sharding later as a one-file change.
  */
 
+import type { BuildNumberRecord } from '../fingerprint/build-number';
 import type { Bindings } from '../types';
-import type { AcquireResult, ReleaseInput, RouteKey, Slot, TokenPoolClient } from './types';
+import type {
+	AcquireResult,
+	ReleaseInput,
+	RouteKey,
+	Slot,
+	StaticFingerprintRecord,
+	StaticTokenKind,
+	TokenPoolClient,
+} from './types';
 
 /** Default DO instance name. Sharding refactor swaps this constant. */
 export const POOL_INSTANCE_NAME = 'token-pool-v1';
@@ -40,6 +49,11 @@ export function getPoolStub(env: Bindings, _slot?: Slot): DurableObjectStub {
  * Build a TokenPoolClient backed by the given DO stub. Each method forwards
  * to the underlying DO RPC. The DO is responsible for ordering and
  * atomicity; this wrapper is intentionally thin.
+ *
+ * The fingerprint-related methods (`getStaticFingerprint`,
+ * `getBuildNumberRecord`) are present on the real client; the
+ * {@link TokenPoolClient} interface declares them optional so mock clients in
+ * tests can omit them.
  */
 export function createTokenPoolClient(stub: DurableObjectStub): TokenPoolClient {
 	const rpc = stub as unknown as RpcShape;
@@ -50,6 +64,12 @@ export function createTokenPoolClient(stub: DurableObjectStub): TokenPoolClient 
 		},
 		release(label: string, requestId: string, response: ReleaseInput): Promise<void> {
 			return rpc.release(label, requestId, response);
+		},
+		getStaticFingerprint(kind: StaticTokenKind): Promise<StaticFingerprintRecord | null> {
+			return rpc.getStaticFingerprint(kind);
+		},
+		getBuildNumberRecord(): Promise<BuildNumberRecord | null> {
+			return rpc.getBuildNumberRecord();
 		},
 	};
 }
@@ -62,4 +82,6 @@ export function createTokenPoolClient(stub: DurableObjectStub): TokenPoolClient 
 interface RpcShape {
 	acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
 	release(label: string, requestId: string, response: ReleaseInput): Promise<void>;
+	getStaticFingerprint(kind: StaticTokenKind): Promise<StaticFingerprintRecord | null>;
+	getBuildNumberRecord(): Promise<BuildNumberRecord | null>;
 }

@@ -51,7 +51,15 @@
 	},
 	"migrations": [
 		{ "tag": "v1", "new_sqlite_classes": ["TokenPoolDO"] }
-	]
+	],
+	/**
+	 * Scheduled handlers.
+	 * `0 4 * * *` = 04:00 UTC daily - refreshes the Discord client
+	 * build_number for fingerprint composition.
+	 */
+	"triggers": {
+		"crons": ["0 4 * * *"]
+	}
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement

@@ -33,6 +33,7 @@ import { customRoutes } from './routes/custom';
 import { proxyRoute } from './routes/proxy';
 import { buildAdminRoutes } from './routes/admin';
 import { buildHealthcheckRoute } from './routes/healthcheck';
+import { scheduledBuildNumberHandler } from './scheduled/build-number-refresh';
 
 import type { RotatorVariables, TokenPoolClient } from './rotator/types';
 
@@ -143,5 +144,11 @@ export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolCli
   return app;
 }
 
-/** Default app instance exported for Cloudflare Workers runtime. */
-export default createApp();
+/** Worker entry: fetch handler + daily scheduled scraper for the Discord build_number. */
+const app = createApp();
+export default {
+	fetch: app.fetch.bind(app),
+	scheduled: async (_event: ScheduledController, env: Bindings, _ctx: ExecutionContext): Promise<void> => {
+		await scheduledBuildNumberHandler(env);
+	},
+};
