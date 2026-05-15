@@ -10,10 +10,15 @@
  * @module rotator/do
  * Durable Object implementation of the token pool rotator.
  *
- * Storage layout: each token is persisted under key `token:${label}`. The DO
- * loads all tokens at the top of each RPC, mutates in memory, writes back the
- * mutated rows. Selection logic lives in `selection.ts` (pure function, fully
- * testable in isolation).
+ * Storage layout:
+ *   `token:${label}`                       per-token TokenState
+ *   `meta:discord-build-number`            BuildNumberRecord (scheduled scraper writes daily)
+ *   `static-fingerprint:user-default`      StaticFingerprintRecord for DISCORD_TOKEN_USER
+ *   `static-fingerprint:user-premium`      StaticFingerprintRecord for DISCORD_TOKEN_USER_PREMIUM
+ *
+ * The DO loads all token rows at the top of each acquire/release RPC, mutates
+ * in memory, writes back the mutated rows. Selection logic lives in
+ * `selection.ts` (pure function, fully testable in isolation).
  *
  * Concurrency: the DO's single-threaded event loop serializes acquire/release
  * calls. `inFlightCount` is a preferential filter; `requestId`-gated release
@@ -22,6 +27,8 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import type { Bindings } from '../types';
+import { BUILD_NUMBER_META_KEY, type BuildNumberRecord } from '../fingerprint/build-number';
+import { FALLBACK_PROFILE_ID, listProfileIds, lookupProfile } from '../fingerprint/profiles';
 import { chooseToken } from './selection';
 import { evictOldestBucketsIfOverCap, pruneIneligibleGuilds } from './validators';
 import type {
@@ -34,12 +41,15 @@ import type {
 	RouteKey,
 	Slot,
 	SlotHealth,
+	StaticFingerprintRecord,
+	StaticTokenKind,
 	TokenState,
 	TokenStatus,
 	TokenSummary,
 } from './types';
 
 const TOKEN_KEY_PREFIX = 'token:';
+const STATIC_FINGERPRINT_PREFIX = 'static-fingerprint:';
 const INELIGIBLE_GUILD_TTL_MS = 60 * 60 * 1000; // 1 hour
 const COOLDOWN_BACKOFF_FACTOR = 1.5;
 
@@ -80,7 +90,27 @@ export function summarize(t: TokenState): TokenSummary {
 		bucketCount: Object.keys(t.bucketStates).length,
 		registeredAt: t.registeredAt,
 		guildIds: t.guildIds,
+		fingerprintProfileId: t.fingerprintProfileId,
 	};
+}
+
+/**
+ * Deterministically pick a profile id for a token. Stable hash of `label`
+ * modulo the registry size, so the same label always maps to the same profile
+ * (until persisted - after first use, the assignment is read from storage
+ * instead, so growing the registry does not reshuffle existing tokens).
+ *
+ * FNV-1a 32-bit hash. Six lines, no crypto dependency, sufficient avalanche
+ * for spreading 20 labels across ~12 profiles.
+ */
+export function pickProfileId(label: string, profileIds: readonly string[]): string {
+	if (profileIds.length === 0) return FALLBACK_PROFILE_ID;
+	let h = 0x811c9dc5;
+	for (let i = 0; i < label.length; i++) {
+		h ^= label.charCodeAt(i);
+		h = Math.imul(h, 0x01000193) >>> 0;
+	}
+	return profileIds[h % profileIds.length];
 }
 
 /**
@@ -90,7 +120,8 @@ export function summarize(t: TokenState): TokenSummary {
 export class TokenPoolDO extends DurableObject<Bindings> {
 	/**
 	 * Acquire a token for the given slot + route. Updates lastUsedAt and
-	 * inFlightCount on the chosen token; persists immediately.
+	 * inFlightCount on the chosen token; persists immediately. If the chosen
+	 * token has no `fingerprintProfileId` yet, assigns one deterministically.
 	 */
 	async acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult> {
 		const now = Date.now();
@@ -104,6 +135,12 @@ export class TokenPoolDO extends DurableObject<Bindings> {
 		const t = result.chosen;
 		t.lastUsedAt = now;
 		t.inFlightCount += 1;
+
+		// First-use fingerprint assignment, persisted immediately.
+		if (!t.fingerprintProfileId) {
+			t.fingerprintProfileId = pickProfileId(t.label, listProfileIds());
+		}
+
 		await this.ctx.storage.put(`${TOKEN_KEY_PREFIX}${t.label}`, t);
 
 		return {
@@ -111,6 +148,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
 			label: t.label,
 			tokenSecret: t.tokenSecret,
 			requestId: crypto.randomUUID(),
+			fingerprintProfileId: t.fingerprintProfileId,
 		};
 	}
 
@@ -235,10 +273,74 @@ export class TokenPoolDO extends DurableObject<Bindings> {
 		return tokens.filter((t) => t.slot === slot).length;
 	}
 
+	/**
+	 * Override the fingerprint profile id for a specific token. Validated by
+	 * the admin endpoint; the DO trusts the caller's `profileId` value. Returns
+	 * `not-found` when the label does not exist so the admin layer can surface
+	 * a constant-time generic 400.
+	 */
+	async setTokenFingerprintProfile(
+		label: string,
+		profileId: string,
+	): Promise<{ ok: true } | { ok: false; reason: 'not-found' }> {
+		const key = `${TOKEN_KEY_PREFIX}${label}`;
+		const t = await this.ctx.storage.get<TokenState>(key);
+		if (!t) return { ok: false, reason: 'not-found' };
+		t.fingerprintProfileId = profileId;
+		await this.ctx.storage.put(key, t);
+		return { ok: true };
+	}
+
+	/**
+	 * Read the live build-number record. Null when no scrape has ever
+	 * succeeded; callers fall back to FALLBACK_BUILD_NUMBER.
+	 */
+	async getBuildNumberRecord(): Promise<BuildNumberRecord | null> {
+		const r = await this.ctx.storage.get<BuildNumberRecord>(BUILD_NUMBER_META_KEY);
+		return r ?? null;
+	}
+
+	/** Persist a build-number record (scheduled scraper + admin refresh endpoint). */
+	async setBuildNumberRecord(record: BuildNumberRecord): Promise<void> {
+		await this.ctx.storage.put(BUILD_NUMBER_META_KEY, record);
+	}
+
+	/** Static-fingerprint identity per non-pool kind. Null when unset. */
+	async getStaticFingerprint(kind: StaticTokenKind): Promise<StaticFingerprintRecord | null> {
+		const r = await this.ctx.storage.get<StaticFingerprintRecord>(`${STATIC_FINGERPRINT_PREFIX}${kind}`);
+		return r ?? null;
+	}
+
+	/** Persist a static-fingerprint identity. Validated upstream by admin endpoint. */
+	async setStaticFingerprint(kind: StaticTokenKind, profileId: string): Promise<void> {
+		const record: StaticFingerprintRecord = { profileId, assignedAt: Date.now() };
+		await this.ctx.storage.put(`${STATIC_FINGERPRINT_PREFIX}${kind}`, record);
+	}
+
+	/** Read both static-fingerprint identities at once. Convenience for the admin GET. */
+	async listStaticFingerprints(): Promise<{
+		userDefault: string | null;
+		userPremium: string | null;
+	}> {
+		const [d, p] = await Promise.all([
+			this.getStaticFingerprint('user-default'),
+			this.getStaticFingerprint('user-premium'),
+		]);
+		return {
+			userDefault: d?.profileId ?? null,
+			userPremium: p?.profileId ?? null,
+		};
+	}
+
 	private async loadAllTokens(): Promise<TokenState[]> {
 		const map = await this.ctx.storage.list<TokenState>({ prefix: TOKEN_KEY_PREFIX });
 		return Array.from(map.values());
 	}
+}
+
+/** Re-export profile validation helper so admin route doesn't need to import fingerprint internals. */
+export function isKnownProfileId(profileId: string): boolean {
+	return lookupProfile(profileId) !== undefined;
 }
 
 function rollup(tokens: TokenState[], slot: Slot, now: number): SlotHealth {

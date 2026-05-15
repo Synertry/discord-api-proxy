@@ -18,6 +18,20 @@
 /** Two strictly isolated pools. Default consumers never see premium tokens; vice versa. */
 export type Slot = 'default' | 'premium';
 
+/**
+ * Static-token fingerprint identity. The static `DISCORD_TOKEN_USER` /
+ * `DISCORD_TOKEN_USER_PREMIUM` tokens don't live in the DO, but their
+ * fingerprint profile assignment does (so the same static token always
+ * appears to Discord as the same client).
+ */
+export type StaticTokenKind = 'user-default' | 'user-premium';
+
+/** Per-kind static fingerprint mapping (operator-set via /admin/static-fingerprint). */
+export interface StaticFingerprintRecord {
+	profileId: string;
+	assignedAt: number;
+}
+
 /** Status of a registered token. `invalid` blocks selection until an admin resets it. */
 export type TokenStatus = 'active' | 'invalid' | 'suspended';
 
@@ -72,6 +86,13 @@ export interface TokenState {
 	/** Epoch ms of last release; gates stale-write protection. */
 	lastReleaseAt: number;
 	registeredAt: number;
+	/**
+	 * Assigned fingerprint profile id. Optional for tokens registered before the
+	 * fingerprint-hygiene feature shipped; the DO assigns one deterministically
+	 * on first `acquire()` and persists immediately. Once set it is stable -
+	 * growing the profile registry later does NOT reshuffle existing tokens.
+	 */
+	fingerprintProfileId?: string;
 }
 
 /** Reason an acquire failed when no eligible token is available. */
@@ -83,6 +104,8 @@ export interface AcquireSuccess {
 	label: string;
 	tokenSecret: string;
 	requestId: string;
+	/** Always populated - assignment happens at acquire time if not already set. */
+	fingerprintProfileId: string;
 }
 
 export interface AcquireUnavailable {
@@ -123,6 +146,8 @@ export interface TokenSummary {
 	bucketCount: number;
 	registeredAt: number;
 	guildIds?: string[];
+	/** Assigned fingerprint profile id. Undefined for tokens that have never been acquired. */
+	fingerprintProfileId?: string;
 }
 
 /** Per-slot health rollup returned by `GET /admin/health`. */
@@ -154,6 +179,8 @@ export interface RotatorVariables {
 	/** Set when the rotator middleware acquired a token. Triggers release in proxy.ts. */
 	acquiredLabel?: string;
 	acquiredRequestId?: string;
+	/** Profile id of the acquired pool token (always set on rotation success). */
+	acquiredFingerprintProfileId?: string;
 	/** Lazily-constructed client. Tests inject via createApp(_, mockTokenPool). */
 	tokenPoolClient?: TokenPoolClient;
 }
@@ -161,8 +188,14 @@ export interface RotatorVariables {
 /**
  * Worker-side client interface. Implementations: real DO-backed (production)
  * and `vi.fn()`-backed (tests).
+ *
+ * Fingerprint methods are optional so existing tests can mock with just
+ * acquire/release; the real client always implements them. Call sites use
+ * optional chaining with sensible fallbacks (FALLBACK_BUILD_NUMBER, etc.).
  */
 export interface TokenPoolClient {
 	acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
 	release(label: string, requestId: string, response: ReleaseInput): Promise<void>;
+	getStaticFingerprint?(kind: StaticTokenKind): Promise<StaticFingerprintRecord | null>;
+	getBuildNumberRecord?(): Promise<import('../fingerprint/build-number').BuildNumberRecord | null>;
 }

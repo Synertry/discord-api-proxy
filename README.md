@@ -15,7 +15,8 @@ Original motivation was for my Google Sheets to be able to call the Discord API,
 - **Reverse proxy** - Forwards any request to `https://discord.com/api/v10` with automatic token injection
 - **Dual static-token slots** - Switches between bot and user tokens based on the endpoint or an explicit header. Optionally routes to a second user token (e.g. a premium alt account) when the request authenticates with `AUTH_KEY_PREMIUM`.
 - **Token rotator pool** - On allow-listed user-token paths (search, member lookups, etc.), the request acquires a token from a Durable-Object-backed pool with per-Discord-bucket cooldown tracking. Multiple registered user tokens spread the rate-limit budget transparently. Cross-Worker consumers can share the same pool via the `script_name` DO binding pattern.
-- **Admin API** - `AUTH_KEY_ADMIN`-gated sub-app at `/admin/*` for runtime token pool management (register, list, reset, unregister, health). Distinct auth chain from `AUTH_KEY` / `AUTH_KEY_PREMIUM`; fail-closed when the admin secret is unset.
+- **Per-token fingerprint hygiene** - Each user-token request carries a deterministic browser fingerprint (UA, X-Super-Properties, X-Discord-Locale, ...). Profiles are pinned per token so the same identity is consistent across rotated calls; bot requests carry the Discord-compliant `DiscordBot (...)` UA. A daily cron scrapes Discord's current web `build_number` so the embedded super-properties stay current.
+- **Admin API** - `AUTH_KEY_ADMIN`-gated sub-app at `/admin/*` for runtime pool + fingerprint management (register, list, reset, unregister, health, fingerprint profiles, static-token fingerprint mapping, build-number record). Distinct auth chain from `AUTH_KEY` / `AUTH_KEY_PREMIUM`; fail-closed when the admin secret is unset.
 - **Public healthcheck** - Unauthenticated `GET /healthcheck` returning service status, build hash, and UTC timestamps. Mounted before the sieve so phone browsers, status pages, and uptime monitors can hit it without a key.
 - **Snowflake validation** - Validates Discord IDs in URL paths before forwarding, returning Discord-compatible error responses
 - **Rate limit interception** - Reformats 429 responses into a consistent JSON envelope
@@ -104,10 +105,10 @@ Request
 [Auth Middleware]          Validates x-auth-key or Authorization (AUTH_KEY / AUTH_KEY_PREMIUM); sets authSlot
   |
   v
-[Discord Context]          Selects bot/user static token + User-Agent based on authSlot
+[Discord Context]          Selects bot/user static token + records discordTokenKind based on authSlot
   |
   v
-[Token Rotator]            On allow-listed user-token paths, acquires a token from the DO pool
+[Token Rotator]            On allow-listed user-token paths, acquires a token + fingerprint from the DO pool
   |
   v
 [Snowflake Validator]      Validates Discord IDs in URL path segments
@@ -119,7 +120,7 @@ Request
 [Custom Routes]            /custom/* - Business logic endpoints
   |
   v
-[Proxy Forwarder]          /* - Catch-all to discord.com/api/v10; releases the pool token after fetch
+[Proxy Forwarder]          /* - Composes fingerprint or bot UA, forwards to discord.com/api/v10, releases the pool token after fetch
 ```
 
 > [!NOTE]
@@ -136,10 +137,18 @@ For each request the proxy decides which Discord token to use:
 Once a user-token branch is selected:
 
 - **`AUTH_KEY` -> `default` slot**, **`AUTH_KEY_PREMIUM` -> `premium` slot.** The static token (`DISCORD_TOKEN_USER` / `DISCORD_TOKEN_USER_PREMIUM`) is the default for that slot.
-- **On allow-listed read paths** (`/guilds/:id/messages/search`, `/guilds/:id/members*`, `/channels/:id/messages*`, etc.), the token rotator middleware acquires a registered pool token in the matching slot instead. Falls back to the static token if the pool is empty.
+- **On allow-listed read paths** (`/guilds/:id/messages/search`, `/guilds/:id/members*`, `/channels/:id/messages*`, etc.), the token rotator middleware acquires a registered pool token in the matching slot instead. Empty-slot pools return 503 so operator misconfiguration is visible (no silent downgrade to the static token).
 - **Premium pool isolation.** `default` consumers never see `premium` tokens and vice versa - premium tokens are handpicked higher-access accounts, not a throughput tier.
 
-User token requests also receive a browser-like `User-Agent` header.
+### Fingerprint Hygiene
+
+Each user-token request is decorated with a consistent browser fingerprint header set composed from the assigned profile + current Discord client `build_number`:
+
+- `User-Agent`, `X-Super-Properties` (base64 JSON), `X-Discord-Locale`, `X-Debug-Options`, `Accept`, `Accept-Language`, `Origin`, `Referer`.
+- **Pool tokens.** Each registered token is assigned a profile id on first `acquire()` via a stable hash of its label. The assignment is persisted, so a token's identity is consistent across rotated calls and across cold starts. Operators can override the assignment via `POST /admin/tokens/:label/fingerprint`.
+- **Static tokens.** `DISCORD_TOKEN_USER` and `DISCORD_TOKEN_USER_PREMIUM` get their own fingerprint identity via `POST /admin/static-fingerprint { kind, profileId }`. The mapping is stored in the same Durable Object as the pool.
+- **Bot tokens** carry only `User-Agent: DiscordBot (https://github.com/Synertry/discord-api-proxy, <build hash>)` per Discord's API docs; no super-properties.
+- **Build number.** A daily cron (`0 4 * * *` UTC) scrapes `discord.com/login` and persists the current `build_number` to the DO. Stale records (>7 days) fall back to a hardcoded constant. Manual refresh: `POST /admin/build-number/refresh`.
 
 ### Project Structure
 
@@ -150,14 +159,14 @@ src/
   global.d.ts                 Build-time constants (BUILD_HASH, BUILD_TIMESTAMP)
   middleware/
     auth.ts                   API key authentication (sets authSlot)
-    discord-context.ts        Static-token selection + User-Agent injection
+    discord-context.ts        Static-token selection + discordTokenKind; looks up static fingerprint
     token-rotator.ts          Pool acquire on allow-listed rotatable paths
     subrequest-logger.ts      Wraps proxyFetch for streaming visibility
     snowflake-validator.ts    Discord ID format validation
   routes/
-    proxy.ts                  Catch-all reverse proxy; releases pool token post-fetch
+    proxy.ts                  Catch-all reverse proxy; composes fingerprint or bot UA, releases pool token post-fetch
     custom.ts                 Custom business logic route tree
-    admin.ts                  AUTH_KEY_ADMIN sub-app (token pool management)
+    admin.ts                  AUTH_KEY_ADMIN sub-app (token pool + fingerprint management)
     healthcheck.ts            Public unauthenticated liveness probe
   rotator/
     do.ts                     TokenPoolDO Durable Object class + RPC methods
@@ -167,6 +176,12 @@ src/
     validators.ts             Token format + pool-cap + bucket-states housekeeping
     release-input.ts          Parse X-RateLimit-* response headers
     client.ts                 createTokenPoolClient(stub) + getPoolStub(env) factory
+  fingerprint/                Pure, runtime-agnostic
+    profiles.ts               FingerprintProfile registry + FALLBACK_PROFILE_ID
+    compose.ts                composeFingerprint + composeBotUserAgent (pure)
+    build-number.ts           selectBuildNumber (pure) + isolated DO read helper
+  scheduled/
+    build-number-refresh.ts   Daily cron handler scraping discord.com/login
   custom/
     chillzone/events/
       bingo/                  Bingo participant counts (uses the rotator)
@@ -204,7 +219,7 @@ Returns `{ "tally": 0 }`. Placeholder for now. Not yet imported from my private 
 ## Testing
 
 ```bash
-bun run test           # Run all 247 tests across 24 suites
+bun run test           # Run all 312 tests across 27 suites
 bun run test -- --ui   # Open Vitest UI
 ```
 

@@ -69,6 +69,7 @@ describe('tokenRotatorMiddleware', () => {
 			label: 'tok-3',
 			tokenSecret: 'POOLED_SECRET',
 			requestId: 'req-1',
+			fingerprintProfileId: 'profile-chrome-win-de-1',
 		}));
 		const app = buildApp({ acquire, release: vi.fn() });
 
@@ -90,6 +91,7 @@ describe('tokenRotatorMiddleware', () => {
 			label: 'p1',
 			tokenSecret: 'PREMIUM',
 			requestId: 'req-2',
+			fingerprintProfileId: 'profile-chrome-win-de-1',
 		}));
 		const app = buildApp({ acquire, release: vi.fn() }, 'premium');
 		await app.request('http://localhost/guilds/219564597349318656/messages/search', {}, MOCK_ENV);

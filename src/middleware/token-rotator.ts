@@ -13,7 +13,9 @@
  * Runs after `discordContextMiddleware` (so `c.var.discordToken` already holds
  * a static-token fallback) and before `snowflakeValidatorMiddleware`. For
  * paths in the rotation allowlist, calls `tokenPoolClient.acquire(...)` and
- * overwrites `c.var.discordToken` with the acquired token's secret.
+ * overwrites `c.var.discordToken` with the acquired token's secret. The
+ * acquired token's `fingerprintProfileId` is also recorded on context so the
+ * proxy can compose the matching fingerprint headers.
  *
  * The corresponding `release` happens inside `src/routes/proxy.ts` after the
  * Discord response comes back. Bingo's discord-client manages its own
@@ -38,8 +40,9 @@ import type { RotatorVariables, Slot } from '../rotator/types';
  *
  * Reads `c.var.authSlot` to decide which pool to draw from. If the rotator
  * succeeds, `c.var.discordToken` is overwritten with the acquired token (no
- * `Bot ` prefix - rotated tokens are always user tokens) and the
- * `discordUserAgent` from `discordContextMiddleware` is preserved.
+ * `Bot ` prefix - rotated tokens are always user tokens) and
+ * `c.var.acquiredFingerprintProfileId` is set so the proxy uses the matching
+ * fingerprint.
  */
 export const tokenRotatorMiddleware = createMiddleware<{
 	Bindings: Bindings;
@@ -91,6 +94,9 @@ export const tokenRotatorMiddleware = createMiddleware<{
 	c.set('discordToken', result.tokenSecret);
 	c.set('acquiredLabel', result.label);
 	c.set('acquiredRequestId', result.requestId);
+	if (result.fingerprintProfileId) {
+		c.set('acquiredFingerprintProfileId', result.fingerprintProfileId);
+	}
 
 	await next();
 });

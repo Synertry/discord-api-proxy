@@ -191,6 +191,90 @@ describe('admin POST /tokens/:label/reset', () => {
 	});
 });
 
+describe('admin fingerprint endpoints', () => {
+	it('GET /admin/fingerprint/profiles returns the registry ids + fallback', async () => {
+		const app = admin();
+		const res = await adminGet(app, '/admin/fingerprint/profiles');
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { profileIds: string[]; fallbackProfileId: string };
+		expect(body.profileIds.length).toBeGreaterThanOrEqual(8);
+		expect(body.profileIds).toContain(body.fallbackProfileId);
+	});
+
+	it('POST /admin/tokens/:label/fingerprint validates profileId and returns 400 on unknown', async () => {
+		const app = admin();
+		const label = nextLabel();
+		await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: VALID_TOKEN });
+		const bad = await adminPost(app, `/admin/tokens/${label}/fingerprint`, { profileId: 'nonsense' });
+		expect(bad.status).toBe(400);
+	});
+
+	it('POST /admin/tokens/:label/fingerprint sets the assignment', async () => {
+		const app = admin();
+		const label = nextLabel();
+		await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: VALID_TOKEN });
+		const ok = await adminPost(app, `/admin/tokens/${label}/fingerprint`, {
+			profileId: 'profile-chrome-win-de-1',
+		});
+		expect(ok.status).toBe(200);
+
+		// GET /tokens reflects the override
+		const list = await adminGet(app, '/admin/tokens');
+		const body = (await list.json()) as { tokens: Array<{ label: string; fingerprintProfileId?: string }> };
+		const ours = body.tokens.find((t) => t.label === label);
+		expect(ours?.fingerprintProfileId).toBe('profile-chrome-win-de-1');
+	});
+
+	it('POST /admin/static-fingerprint sets per-kind mapping; GET returns it', async () => {
+		const app = admin();
+		const set = await adminPost(app, '/admin/static-fingerprint', {
+			kind: 'user-default',
+			profileId: 'profile-chrome-win-de-1',
+		});
+		expect(set.status).toBe(200);
+		const got = await adminGet(app, '/admin/static-fingerprint');
+		expect(got.status).toBe(200);
+		const body = (await got.json()) as { userDefault: string | null; userPremium: string | null };
+		expect(body.userDefault).toBe('profile-chrome-win-de-1');
+	});
+
+	it('POST /admin/static-fingerprint rejects unknown kind with 400', async () => {
+		const app = admin();
+		const res = await adminPost(app, '/admin/static-fingerprint', {
+			kind: 'admin-user',
+			profileId: 'profile-chrome-win-de-1',
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it('POST /admin/static-fingerprint rejects unknown profileId with 400', async () => {
+		const app = admin();
+		const res = await adminPost(app, '/admin/static-fingerprint', {
+			kind: 'user-default',
+			profileId: 'made-up',
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it('GET /admin/build-number returns null before any scrape', async () => {
+		const app = admin();
+		const res = await adminGet(app, '/admin/build-number');
+		expect(res.status).toBe(200);
+		const body = await res.text();
+		expect(body).toBe('null');
+	});
+
+	it('all fingerprint endpoints require admin auth (401 without key)', async () => {
+		const app = admin();
+		const unauthenticated = await app.request(
+			'http://localhost/admin/fingerprint/profiles',
+			{},
+			ENV_OVERRIDE,
+		);
+		expect(unauthenticated.status).toBe(401);
+	});
+});
+
 describe('admin GET /health', () => {
 	it('returns per-slot rollup', async () => {
 		const app = admin();

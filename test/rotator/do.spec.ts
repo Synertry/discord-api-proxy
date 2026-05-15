@@ -245,6 +245,80 @@ describe('TokenPoolDO.release', () => {
 	});
 });
 
+describe('TokenPoolDO fingerprint integration', () => {
+	it('assigns a fingerprintProfileId on first acquire and persists it', async () => {
+		const stub = freshStub();
+		await stub.register({ label: 'tok', slot: 'default', tokenSecret: VALID_TOKEN });
+		const acq1 = await stub.acquire('default', ROUTE);
+		expect(acq1.ok).toBe(true);
+		if (!acq1.ok) return;
+		expect(typeof acq1.fingerprintProfileId).toBe('string');
+		expect(acq1.fingerprintProfileId.length).toBeGreaterThan(0);
+
+		// Subsequent acquires return the same id
+		await stub.release(acq1.label, acq1.requestId, { status: 200, routeKey: ROUTE });
+		const acq2 = await stub.acquire('default', ROUTE);
+		if (!acq2.ok) return;
+		expect(acq2.fingerprintProfileId).toBe(acq1.fingerprintProfileId);
+
+		// Summary exposes the assignment
+		const list = await stub.list();
+		expect(list[0].fingerprintProfileId).toBe(acq1.fingerprintProfileId);
+	});
+
+	it('setTokenFingerprintProfile overrides the assignment', async () => {
+		const stub = freshStub();
+		await stub.register({ label: 'tok', slot: 'default', tokenSecret: VALID_TOKEN });
+		const r = await stub.setTokenFingerprintProfile('tok', 'profile-chrome-win-de-1');
+		expect(r.ok).toBe(true);
+		const acq = await stub.acquire('default', ROUTE);
+		if (!acq.ok) return;
+		expect(acq.fingerprintProfileId).toBe('profile-chrome-win-de-1');
+	});
+
+	it('setTokenFingerprintProfile on missing label returns not-found', async () => {
+		const stub = freshStub();
+		const r = await stub.setTokenFingerprintProfile('nope', 'profile-chrome-win-de-1');
+		expect(r.ok).toBe(false);
+	});
+
+	it('static fingerprint roundtrip per kind', async () => {
+		const stub = freshStub();
+		expect(await stub.getStaticFingerprint('user-default')).toBeNull();
+		expect(await stub.getStaticFingerprint('user-premium')).toBeNull();
+
+		await stub.setStaticFingerprint('user-default', 'profile-chrome-win-de-1');
+		await stub.setStaticFingerprint('user-premium', 'profile-firefox-linux-de-1');
+
+		const d = await stub.getStaticFingerprint('user-default');
+		const p = await stub.getStaticFingerprint('user-premium');
+		expect(d?.profileId).toBe('profile-chrome-win-de-1');
+		expect(p?.profileId).toBe('profile-firefox-linux-de-1');
+
+		const mapping = await stub.listStaticFingerprints();
+		expect(mapping.userDefault).toBe('profile-chrome-win-de-1');
+		expect(mapping.userPremium).toBe('profile-firefox-linux-de-1');
+	});
+
+	it('build-number record roundtrip', async () => {
+		const stub = freshStub();
+		expect(await stub.getBuildNumberRecord()).toBeNull();
+		await stub.setBuildNumberRecord({ buildNumber: 600_000, fetchedAt: 1_700_000_000_000, source: 'scraped' });
+		const r = await stub.getBuildNumberRecord();
+		expect(r).toEqual({ buildNumber: 600_000, fetchedAt: 1_700_000_000_000, source: 'scraped' });
+	});
+
+	it('loadAllTokens prefix scan does not pick up meta keys', async () => {
+		const stub = freshStub();
+		await stub.register({ label: 'tok', slot: 'default', tokenSecret: VALID_TOKEN });
+		await stub.setBuildNumberRecord({ buildNumber: 1, fetchedAt: 1, source: 'manual' });
+		await stub.setStaticFingerprint('user-default', 'profile-chrome-win-de-1');
+		const list = await stub.list();
+		expect(list).toHaveLength(1);
+		expect(list[0].label).toBe('tok');
+	});
+});
+
 describe('TokenPoolDO.reset and health', () => {
 	it('reset returns active and clears cooldowns', async () => {
 		const stub = freshStub();

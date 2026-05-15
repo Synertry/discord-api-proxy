@@ -26,7 +26,13 @@ const ENV: Bindings = {
 const ROTATABLE_PATH = '/guilds/219564597349318656/messages/search?author_id=999';
 
 function ok(label: string, secret: string, requestId: string): AcquireResult {
-	return { ok: true, label, tokenSecret: secret, requestId };
+	return {
+		ok: true,
+		label,
+		tokenSecret: secret,
+		requestId,
+		fingerprintProfileId: 'profile-chrome-win-de-1',
+	};
 }
 
 function buildPoolClient(
