@@ -4,15 +4,7 @@ Open work, deliberately deferred decisions, and follow-up items that didn't make
 
 ## Token rotator (post-PR-#47)
 
-Multi-token Discord user-token rotator landed in PR #47. v1 covers the proxy, bingo migration, admin API, and per-Discord-bucket cooldown tracking. The list below is what was scoped out of v1 on purpose, plus near-term operational items.
-
-### Operational follow-ups
-
-- [ ] **Production deploy.** Once the bootstrap workflow applies the `TokenPoolDO` migration, future pushes to `production` should resume going through the versioned deploy pipeline. Verify the next non-migration push succeeds.
-- [ ] **Production secrets.** Set `AUTH_KEY_ADMIN` via `wrangler secret put AUTH_KEY_ADMIN`. The admin sub-app fail-closes (503) when this is unset, so leaving it unset effectively disables `/admin/*`.
-- [ ] **Register handpicked tokens.** Use `/admin/tokens` against the deployed proxy with the operator-only auth key. Start with 2-3 tokens in `default`. Pool cap is 20/slot.
-- [ ] **Live validation.** Run a GAS-driven bingo refresh on staging with 3 tokens registered. Measure wall time vs the 5-7 min single-token baseline. That is the receipt for v1.
-- [ ] **`/admin/health` watch during first prod refresh.** Confirm `default.active` dips into `cooling` but never to zero (would surface as consumer 429s).
+Multi-token Discord user-token rotator landed in PR #47. v1 covers the proxy, bingo migration, admin API, and per-Discord-bucket cooldown tracking. v1 operational rollout is complete (token pool registered in prod, bingo refresh validated, `/admin/health` confirmed healthy).
 
 ### Deliberately deferred (v2+ candidates)
 
@@ -23,6 +15,7 @@ Multi-token Discord user-token rotator landed in PR #47. v1 covers the proxy, bi
 - [ ] **Published `@synertry/discord-rotator-types` package.** Cross-codebase consumers currently copy-paste `src/rotator/types.ts`. Publish when there are 2+ active consumers OR the types drift in a way that bites someone.
 - [ ] **Smart Placement.** Disabled in v1. Revisit once we have real RPC latency data on the DO path.
 - [ ] **Reaction-emoji route inclusion in the rotation allowlist.** v1 keeps `PUT|DELETE /channels/:id/messages/:id/reactions/:emoji/@me` on static tokens because they are authorship endpoints. If a read-only reaction-fetch use case shows up (`GET /channels/:id/messages/:id/reactions/:emoji`), add it to `isRotatableRoute`.
+- [ ] **Server-side `tokenSecret` uniqueness check.** `TokenPoolDO.register()` keys by `label` only, so the same token registered under two different labels currently succeeds and wastes rotation (both entries share Discord's per-token-per-bucket budget). A cheap O(N) hash-compare at register-time would close it. Pool cap is 20, so the scan is trivial.
 
 ## Cross-cutting tech debt (out of scope for the rotator)
 
@@ -30,6 +23,10 @@ These predate the rotator and are tracked separately. Listed here so they don't 
 
 - [ ] **`[subreq]` middleware logs full URLs including query params.** Token-bearing or PII-bearing query params (search queries, `author_id`, ...) end up in logs. Strip or hash before logging.
 - [ ] **`console.log` calls in production paths.** Violates the TypeScript coding standard. Audit and route through a proper logger.
+
+## Closed experiments (do not re-attempt without re-checking)
+
+- **`bun --bun ./node_modules/wrangler/bin/wrangler.js ...` for CI deploy commands** - tried in PR #53, silently broke `wrangler versions upload` (banner prints, exit 0, no upload). Root cause: wrangler's `bin/wrangler.js` entry re-spawns the dist CLI via `process.execPath` with node-only flags (`--no-warnings`, `--experimental-vm-modules`); under Bun the child becomes `bun --no-warnings --experimental-vm-modules .../cli.js` and Bun's Node-API emulation isn't deep enough for the upload path. Reverted to the PR #38 pattern (`actions/setup-node@v6.4.0` + `node ./node_modules/wrangler/bin/wrangler.js ...`) in PR #55. Don't re-attempt without verifying `wrangler versions upload` succeeds on CI first.
 
 ## Process
 
