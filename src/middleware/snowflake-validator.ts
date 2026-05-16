@@ -14,7 +14,8 @@
  * and validates that the following path segment is a valid snowflake (17–20 digit
  * numeric string). Returns a Discord-API-compatible error response on failure.
  *
- * Special cases: `@me` is allowed for `users` and `applications` endpoints.
+ * Special cases: see VIRTUAL_IDS below for path segments that legitimately
+ * follow a Discord resource keyword without being a snowflake.
  */
 
 import { createMiddleware } from 'hono/factory';
@@ -33,7 +34,29 @@ const SNOWFLAKE_RESOURCES = new Set([
   'skus',
 ]);
 
-/** Discord snowflakes are 64-bit integers: 17–20 decimal digit strings. */
+/**
+ * Virtual (non-snowflake) path segments that legitimately follow a Discord
+ * resource keyword. Each entry must correspond to a real Discord API v10
+ * endpoint; document the endpoint inline so anyone adding a new exemption
+ * proves it exists in Discord's docs first.
+ *
+ *   users/@me              GET   /users/@me                                          self user
+ *   applications/@me       GET   /applications/@me                                   self application
+ *   messages/@original     PATCH /webhooks/{app_id}/{token}/messages/@original       interaction response message
+ *   messages/search        GET   /guilds/{guild_id}/messages/search                  guild message search (user token)
+ *   messages/bulk-delete   POST  /channels/{channel_id}/messages/bulk-delete         bulk delete
+ *
+ * `pins` used to be listed here but no `messages/pins` endpoint exists in
+ * the v10 API (pins live at `/channels/{id}/pins` and individual pinning
+ * uses `/channels/{id}/messages/{msg_id}/pin`, singular).
+ */
+const VIRTUAL_IDS: Readonly<Record<string, ReadonlySet<string>>> = {
+  users: new Set(['@me']),
+  applications: new Set(['@me']),
+  messages: new Set(['@original', 'search', 'bulk-delete']),
+};
+
+/** Discord snowflakes are 64-bit integers: 17-20 decimal digit strings. */
 const SNOWFLAKE_REGEX = /^\d{17,20}$/;
 
 /**
@@ -52,12 +75,10 @@ export const snowflakeValidatorMiddleware = createMiddleware(async (c, next) => 
     if (SNOWFLAKE_RESOURCES.has(resource)) {
       const id = segments[i + 1];
 
-      // Allow virtual IDs: @me for user/application self-references,
-      // @original for interaction response message references
-      if ((resource === 'users' || resource === 'applications') && id === '@me') {
-        continue;
-      }
-      if (resource === 'messages' && (id === '@original' || id === 'search' || id === 'pins' || id === 'bulk-delete')) {
+      // Skip validation for virtual IDs that map to real Discord
+      // endpoints (e.g. /users/@me, /messages/bulk-delete). See
+      // VIRTUAL_IDS above for the documented list.
+      if (VIRTUAL_IDS[resource]?.has(id)) {
         continue;
       }
 
