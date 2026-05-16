@@ -5,10 +5,29 @@ on:
     branches:
       - production
 
+# Serialize production deploys. Two rapid pushes to `production` (e.g. a
+# Dependabot bump landing on top of a feature merge) would otherwise race
+# through `wrangler versions upload` / `versions deploy` concurrently and
+# the latter call could promote an older version than the latest push.
+# `cancel-in-progress: false` keeps both in the queue rather than aborting
+# a half-uploaded version, which is safer for Cloudflare API state.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     name: Deploy
+    timeout-minutes: 10
+    # Expose deploy metadata to the downstream notify job. Outputs are set as
+    # soon as their value is known, so even a mid-pipeline failure (upload,
+    # version-list, or promote step) still surfaces whatever was already
+    # computed - the notify job degrades gracefully when fields are empty.
+    outputs:
+      short_sha: ${{ steps.deploy.outputs.short_sha }}
+      deploy_msg: ${{ steps.deploy.outputs.deploy_msg }}
+      version_id: ${{ steps.deploy.outputs.version_id }}
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -33,6 +52,7 @@ jobs:
 
       - name: Install dependencies
         if: steps.cache.outputs.cache-hit != 'true'
+        timeout-minutes: 3
         run: bun install
 
       - name: Save bun cache and node_modules
@@ -70,6 +90,8 @@ jobs:
             wrangler.jsonc
 
       - name: Deploy to Cloudflare
+        id: deploy
+        timeout-minutes: 5
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -98,6 +120,13 @@ jobs:
           # We use Bash native substring ${var:offset:length} which handles UTF-8 better than cut
           DEPLOY_MSG="${SAFE_TITLE:0:50}"
 
+          # Emit metadata outputs IMMEDIATELY so the notify job has them even
+          # if upload/list/promote below fails. (Job outputs only flush on
+          # successful step completion, but a failing step still flushes any
+          # writes made before its non-zero exit.)
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "deploy_msg=$DEPLOY_MSG" >> "$GITHUB_OUTPUT"
+
           echo "📝 Message: $DEPLOY_MSG"
           echo "🔖 Tag: $SHORT_SHA"
 
@@ -122,6 +151,10 @@ jobs:
             exit 1
           fi
 
+          # Emit the version_id output before the promote step so the notify
+          # job can report which version got uploaded even if promotion fails.
+          echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
+
           echo "✅ Found Version ID: $VERSION_ID"
 
           # --- 4. PROMOTE ---
@@ -129,3 +162,23 @@ jobs:
           node ./node_modules/wrangler/bin/wrangler.js versions deploy "$VERSION_ID" \
             --message "$DEPLOY_MSG" \
             --yes
+
+  notify:
+    name: Notify Discord
+    needs: deploy
+    # Run on success, failure, AND cancellation so the channel sees a signal
+    # for every deploy attempt. Skipping the notify on `skipped` would hide
+    # cases where deploy never started.
+    if: ${{ always() }}
+    uses: ./.github/workflows/notify.yaml
+    with:
+      status: ${{ needs.deploy.result }}
+      sha: ${{ github.sha }}
+      short_sha: ${{ needs.deploy.outputs.short_sha }}
+      version_id: ${{ needs.deploy.outputs.version_id }}
+      deploy_msg: ${{ needs.deploy.outputs.deploy_msg }}
+      actor: ${{ github.actor }}
+      commit_url: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+      run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    secrets:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}

@@ -1,0 +1,171 @@
+# Reusable workflow: post a Discord embed describing the outcome of a deploy.
+# Invoked from deploy.yaml's final `notify` job with `needs.deploy.result` so
+# both successful and failed deploys produce an observable signal.
+#
+# Discord embed character limits (documented at
+# https://discord.com/developers/docs/resources/message#embed-object-embed-limits):
+#   title          <= 256
+#   description    <= 4096
+#   field value    <= 1024
+#   total embed    <= 6000 (sum of all rendered text)
+# We truncate proactively so a malformed upstream input cannot cause Discord
+# to reject the webhook payload.
+name: Deploy Notification
+
+on:
+  workflow_call:
+    inputs:
+      status:
+        required: true
+        type: string
+        description: 'Result of the upstream deploy job (success | failure | cancelled | skipped)'
+      sha:
+        required: true
+        type: string
+        description: 'Full commit SHA being deployed'
+      short_sha:
+        required: false
+        type: string
+        default: ''
+        description: 'Truncated commit SHA (8 chars) used as the Cloudflare version tag'
+      version_id:
+        required: false
+        type: string
+        default: ''
+        description: 'Cloudflare Worker version ID returned by `wrangler versions upload`; empty on early failure'
+      deploy_msg:
+        required: false
+        type: string
+        default: ''
+        description: 'Commit title used as the Cloudflare deploy message; empty on early failure'
+      actor:
+        required: true
+        type: string
+        description: 'GitHub login that triggered the deploy (github.actor)'
+      commit_url:
+        required: true
+        type: string
+        description: 'GitHub URL to the deployed commit'
+      run_url:
+        required: true
+        type: string
+        description: 'GitHub URL to this workflow run'
+    secrets:
+      DISCORD_WEBHOOK_URL:
+        required: true
+        description: 'Discord webhook URL receiving the embed'
+
+jobs:
+  discord:
+    name: Send Discord Notification
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Send Discord Notification
+        env:
+          STATUS: ${{ inputs.status }}
+          SHA: ${{ inputs.sha }}
+          SHORT_SHA: ${{ inputs.short_sha }}
+          VERSION_ID: ${{ inputs.version_id }}
+          DEPLOY_MSG: ${{ inputs.deploy_msg }}
+          ACTOR: ${{ inputs.actor }}
+          COMMIT_URL: ${{ inputs.commit_url }}
+          RUN_URL: ${{ inputs.run_url }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+
+          # Hard-cap a string to a maximum byte length, appending "..." when
+          # truncated. Uses bash parameter substitution (UTF-8-safe for ASCII
+          # inputs; our inputs are commit messages + GitHub identifiers).
+          truncate_str() {
+            local str="$1"
+            local max="$2"
+            if [ "${#str}" -gt "$max" ]; then
+              printf '%s...' "${str:0:$((max-3))}"
+            else
+              printf '%s' "$str"
+            fi
+          }
+
+          # Map deploy result -> embed color (Discord RGB int) + title prefix.
+          case "$STATUS" in
+            success)
+              COLOR=5763719   # green
+              TITLE="✅ discord-api-proxy deployed"
+              ;;
+            failure)
+              COLOR=15548997  # red
+              TITLE="❌ discord-api-proxy deploy FAILED"
+              ;;
+            cancelled)
+              COLOR=9807270   # gray
+              TITLE="🟡 discord-api-proxy deploy cancelled"
+              ;;
+            *)
+              COLOR=10181046  # purple - unexpected upstream result
+              TITLE="⚠️ discord-api-proxy deploy: $STATUS"
+              ;;
+          esac
+
+          # Fall back to the first 7 chars of the full SHA if the short form
+          # never made it out of the deploy job (early failure).
+          DISPLAY_SHA="${SHORT_SHA:-${SHA:0:7}}"
+
+          # Description carries the commit title. May be empty on early failure.
+          DESC="${DEPLOY_MSG:-(no commit message captured)}"
+
+          # Field values. Each is hard-capped to 1024 below.
+          COMMIT_FIELD="[\`${DISPLAY_SHA}\`](${COMMIT_URL})"
+          AUTHOR_FIELD="$ACTOR"
+          VERSION_FIELD="${VERSION_ID:-_(not assigned)_}"
+          LOGS_FIELD="[View workflow run](${RUN_URL})"
+
+          # Apply Discord's per-element character limits.
+          TITLE=$(truncate_str "$TITLE" 256)
+          DESC=$(truncate_str "$DESC" 4096)
+          COMMIT_FIELD=$(truncate_str "$COMMIT_FIELD" 1024)
+          AUTHOR_FIELD=$(truncate_str "$AUTHOR_FIELD" 1024)
+          VERSION_FIELD=$(truncate_str "$VERSION_FIELD" 1024)
+          LOGS_FIELD=$(truncate_str "$LOGS_FIELD" 1024)
+
+          # Build the JSON payload via jq so quotes, newlines, and unicode are
+          # escaped correctly regardless of what came in from the commit title.
+          jq -n \
+            --arg title "$TITLE" \
+            --arg desc "$DESC" \
+            --arg url "$RUN_URL" \
+            --argjson color "$COLOR" \
+            --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg commit "$COMMIT_FIELD" \
+            --arg author "$AUTHOR_FIELD" \
+            --arg version "$VERSION_FIELD" \
+            --arg logs "$LOGS_FIELD" \
+            '{
+              username: "discord-api-proxy",
+              avatar_url: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
+              embeds: [{
+                title: $title,
+                description: $desc,
+                url: $url,
+                color: $color,
+                timestamp: $timestamp,
+                fields: [
+                  { name: "Commit",  value: $commit,  inline: true },
+                  { name: "Author",  value: $author,  inline: true },
+                  { name: "Version", value: $version, inline: true },
+                  { name: "Logs",    value: $logs,    inline: false }
+                ],
+                footer: {
+                  text: "Cloudflare Worker deploy via GitHub Actions"
+                }
+              }]
+            }' > payload.json
+
+          # Fail the notify job if Discord rejects the webhook (4xx/5xx), so
+          # observability gaps surface in the Actions UI instead of silently
+          # going missing.
+          curl --fail-with-body --show-error --silent \
+               -H "Content-Type: application/json" \
+               -d @payload.json \
+               "$DISCORD_WEBHOOK_URL"
