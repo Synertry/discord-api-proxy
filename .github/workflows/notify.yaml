@@ -131,6 +131,11 @@ jobs:
 
           # Build the JSON payload via jq so quotes, newlines, and unicode are
           # escaped correctly regardless of what came in from the commit title.
+          #
+          # `username` constraints (Discord users docs): 2-32 chars, no `@` `#`
+          # `:` backtick or `discord` substring, not `everyone` / `here`.
+          # We use a generic sender name; the embed title already identifies
+          # the project.
           jq -n \
             --arg title "$TITLE" \
             --arg desc "$DESC" \
@@ -142,7 +147,7 @@ jobs:
             --arg version "$VERSION_FIELD" \
             --arg logs "$LOGS_FIELD" \
             '{
-              username: "discord-api-proxy",
+              username: "GitHub Actions",
               avatar_url: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
               embeds: [{
                 title: $title,
