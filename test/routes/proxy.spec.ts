@@ -103,6 +103,32 @@ describe('Proxy Route & Introspection (Integration)', () => {
 		expect(callHeaders.get('User-Agent')).toBe(composeBotUserAgent(BUILD_HASH));
 	});
 
+	it('strips X-Proxy-Token from the forwarded request', async () => {
+		const mockFetch = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ ok: true }), {
+				status: 200,
+				headers: { 'Content-Type': 'application/json' },
+			}),
+		);
+		const app = createApp(mockFetch as unknown as typeof fetch);
+
+		const req = new Request('http://localhost/users/@me', {
+			method: 'GET',
+			headers: {
+				'x-auth-key': 'secret-key',
+				'X-Proxy-Token': 'static',
+			},
+		});
+
+		const res = await app.request(req, undefined, MOCK_ENV);
+		expect(res.status).toBe(200);
+		expect(mockFetch).toHaveBeenCalledTimes(1);
+
+		const callHeaders = (mockFetch.mock.calls[0][1] as RequestInit).headers as Headers;
+		expect(callHeaders.has('X-Proxy-Token')).toBe(false);
+		expect(callHeaders.has('x-proxy-token')).toBe(false);
+	});
+
 	it('intercepts 429 Too Many Requests and formats response', async () => {
 		const mockFetch = vi.fn().mockResolvedValue(
 			new Response('Rate limited', {

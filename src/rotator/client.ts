@@ -62,6 +62,9 @@ export function createTokenPoolClient(stub: DurableObjectStub): TokenPoolClient 
 		acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult> {
 			return rpc.acquire(slot, routeKey, guildId);
 		},
+		acquireByLabel(label: string, slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult> {
+			return rpc.acquireByLabel(label, slot, routeKey, guildId);
+		},
 		release(label: string, requestId: string, response: ReleaseInput): Promise<void> {
 			return rpc.release(label, requestId, response);
 		},
@@ -81,6 +84,7 @@ export function createTokenPoolClient(stub: DurableObjectStub): TokenPoolClient 
  */
 interface RpcShape {
 	acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
+	acquireByLabel(label: string, slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
 	release(label: string, requestId: string, response: ReleaseInput): Promise<void>;
 	getStaticFingerprint(kind: StaticTokenKind): Promise<StaticFingerprintRecord | null>;
 	getBuildNumberRecord(): Promise<BuildNumberRecord | null>;

@@ -189,12 +189,14 @@ export interface RotatorVariables {
  * Worker-side client interface. Implementations: real DO-backed (production)
  * and `vi.fn()`-backed (tests).
  *
- * Fingerprint methods are optional so existing tests can mock with just
- * acquire/release; the real client always implements them. Call sites use
- * optional chaining with sensible fallbacks (FALLBACK_BUILD_NUMBER, etc.).
+ * `acquireByLabel` is optional so existing test mocks need only `acquire` +
+ * `release`; the real client always implements it. Middleware that needs label
+ * pinning checks for the method's presence and surfaces a 503 if a mock omits
+ * it. Fingerprint methods are likewise optional.
  */
 export interface TokenPoolClient {
 	acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
+	acquireByLabel?(label: string, slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
 	release(label: string, requestId: string, response: ReleaseInput): Promise<void>;
 	getStaticFingerprint?(kind: StaticTokenKind): Promise<StaticFingerprintRecord | null>;
 	getBuildNumberRecord?(): Promise<import('../fingerprint/build-number').BuildNumberRecord | null>;

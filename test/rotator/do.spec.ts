@@ -127,6 +127,98 @@ describe('TokenPoolDO.acquire', () => {
 	});
 });
 
+describe('TokenPoolDO.acquireByLabel', () => {
+	it('returns the labeled token when active and matching slot', async () => {
+		const stub = freshStub();
+		await stub.register({ label: 'pinned', slot: 'default', tokenSecret: VALID_TOKEN });
+		const result = await stub.acquireByLabel('pinned', 'default', ROUTE);
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(result.label).toBe('pinned');
+			expect(result.tokenSecret).toBe(VALID_TOKEN);
+			expect(result.requestId).toMatch(/^[0-9a-f-]{36}$/i);
+		}
+	});
+
+	it('persists lastUsedAt and inFlightCount on success', async () => {
+		const stub = freshStub();
+		await stub.register({ label: 'pinned', slot: 'default', tokenSecret: VALID_TOKEN });
+		await stub.acquireByLabel('pinned', 'default', ROUTE);
+		const list = await stub.list();
+		expect(list[0].inFlightCount).toBe(1);
+		expect(list[0].lastUsedAt).toBeGreaterThan(0);
+	});
+
+	it('returns no-eligible-token when the label is missing', async () => {
+		const stub = freshStub();
+		const result = await stub.acquireByLabel('nope', 'default', ROUTE);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason).toBe('no-eligible-token');
+	});
+
+	it('returns no-eligible-token when the slot mismatches', async () => {
+		const stub = freshStub();
+		await stub.register({ label: 'p', slot: 'premium', tokenSecret: VALID_TOKEN });
+		const result = await stub.acquireByLabel('p', 'default', ROUTE);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason).toBe('no-eligible-token');
+	});
+
+	it('returns no-eligible-token when the token is invalid', async () => {
+		const stub = freshStub();
+		await stub.register({ label: 'bad', slot: 'default', tokenSecret: VALID_TOKEN });
+		for (let i = 0; i < 3; i++) {
+			const acq = await stub.acquire('default', ROUTE);
+			if (acq.ok) await stub.release(acq.label, acq.requestId, { status: 401, routeKey: ROUTE });
+		}
+		const result = await stub.acquireByLabel('bad', 'default', ROUTE);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason).toBe('no-eligible-token');
+	});
+
+	it('returns cooldown with retryAfter when globally cooling', async () => {
+		const stub = freshStub();
+		await stub.register({ label: 'cool', slot: 'default', tokenSecret: VALID_TOKEN });
+		const acq = await stub.acquire('default', ROUTE);
+		if (!acq.ok) return;
+		await stub.release(acq.label, acq.requestId, {
+			status: 429,
+			routeKey: ROUTE,
+			retryAfterMs: 2000,
+		});
+		const result = await stub.acquireByLabel('cool', 'default', ROUTE);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.reason).toBe('cooldown');
+			expect(result.retryAfter).toBeGreaterThan(0);
+		}
+	});
+
+	it('returns no-eligible-token when the guild is not in the whitelist', async () => {
+		const stub = freshStub();
+		await stub.register({
+			label: 'narrow',
+			slot: 'default',
+			tokenSecret: VALID_TOKEN,
+			guildIds: ['111111111111111111'],
+		});
+		const result = await stub.acquireByLabel('narrow', 'default', ROUTE, GUILD_ID);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason).toBe('no-eligible-token');
+	});
+
+	it('assigns a fingerprintProfileId on first pinned acquire', async () => {
+		const stub = freshStub();
+		await stub.register({ label: 'fresh', slot: 'default', tokenSecret: VALID_TOKEN });
+		const result = await stub.acquireByLabel('fresh', 'default', ROUTE);
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(typeof result.fingerprintProfileId).toBe('string');
+			expect(result.fingerprintProfileId.length).toBeGreaterThan(0);
+		}
+	});
+});
+
 describe('TokenPoolDO.release', () => {
 	it('updates bucket state from response headers', async () => {
 		const stub = freshStub();
