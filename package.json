@@ -34,7 +34,7 @@
 		"yaml": "^2.9.0"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.16.5",
+		"@cloudflare/vitest-pool-workers": "^0.16.6",
 		"@types/node": "^25.8.0",
 		"typescript": "^6.0.3",
 		"vitest": "^4.1.6",
