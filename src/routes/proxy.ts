@@ -45,7 +45,7 @@ export const proxyRoute = new OpenAPIHono<{
 }>();
 
 /** Internal headers that must not be forwarded to the Discord API. */
-const STRIPPED_HEADERS = new Set(['host', 'x-auth-key', 'x-proxy-context']);
+const STRIPPED_HEADERS = new Set(['host', 'x-auth-key', 'x-proxy-context', 'x-proxy-token']);
 
 type SafeInit = RequestInit & { duplex?: 'half' };
 

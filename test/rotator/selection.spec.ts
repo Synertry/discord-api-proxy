@@ -7,7 +7,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { chooseToken, isBucketCooling, isGuildIneligible } from '../../src/rotator/selection';
+import {
+	chooseToken,
+	evaluateTokenEligibility,
+	isBucketCooling,
+	isGuildIneligible,
+} from '../../src/rotator/selection';
 import type { TokenState } from '../../src/rotator/types';
 
 const ROUTE = 'GET:/guilds/:id/messages/search';
@@ -192,6 +197,65 @@ describe('chooseToken - unavailable reasons', () => {
 		expect(result.chosen).toBeNull();
 		expect(result.unavailable?.reason).toBe('cooldown');
 		expect(result.unavailable?.retryAfter).toBe(2000);
+	});
+});
+
+describe('evaluateTokenEligibility', () => {
+	it('returns ok=true for a fresh active token', () => {
+		const t = makeToken('a');
+		expect(evaluateTokenEligibility(t, 'default', ROUTE, NOW)).toEqual({ ok: true });
+	});
+
+	it('returns no-eligible-token on slot mismatch', () => {
+		const t = makeToken('a', { slot: 'premium' });
+		const r = evaluateTokenEligibility(t, 'default', ROUTE, NOW);
+		expect(r).toEqual({ ok: false, reason: 'no-eligible-token' });
+	});
+
+	it('returns no-eligible-token when status is invalid', () => {
+		const t = makeToken('a', { status: 'invalid' });
+		const r = evaluateTokenEligibility(t, 'default', ROUTE, NOW);
+		expect(r).toEqual({ ok: false, reason: 'no-eligible-token' });
+	});
+
+	it('returns no-eligible-token when guildIds whitelist excludes the requested guild', () => {
+		const t = makeToken('a', { guildIds: ['111'] });
+		const r = evaluateTokenEligibility(t, 'default', ROUTE, NOW, '219');
+		expect(r).toEqual({ ok: false, reason: 'no-eligible-token' });
+	});
+
+	it('returns cooldown with retryAfter when globalCooldownUntil is in the future', () => {
+		const t = makeToken('a', { globalCooldownUntil: NOW + 3000 });
+		const r = evaluateTokenEligibility(t, 'default', ROUTE, NOW);
+		expect(r).toEqual({ ok: false, reason: 'cooldown', retryAfter: 3000 });
+	});
+
+	it('returns cooldown for bucket exhaustion on the route', () => {
+		const t = makeToken('a', {
+			routeToBucket: { [ROUTE]: 'b1' },
+			bucketStates: { b1: { remaining: 0, resetAt: NOW + 2000 } },
+		});
+		const r = evaluateTokenEligibility(t, 'default', ROUTE, NOW);
+		expect(r).toEqual({ ok: false, reason: 'cooldown', retryAfter: 2000 });
+	});
+
+	it('returns cooldown for guild-ineligibility within TTL', () => {
+		const t = makeToken('a', {
+			ineligibleGuilds: [{ guildId: '219', expiresAt: NOW + 1500 }],
+		});
+		const r = evaluateTokenEligibility(t, 'default', ROUTE, NOW, '219');
+		expect(r).toEqual({ ok: false, reason: 'cooldown', retryAfter: 1500 });
+	});
+
+	it('picks the soonest constraint when multiple cooldowns apply', () => {
+		const t = makeToken('a', {
+			globalCooldownUntil: NOW + 5000,
+			routeToBucket: { [ROUTE]: 'b1' },
+			bucketStates: { b1: { remaining: 0, resetAt: NOW + 2000 } },
+			ineligibleGuilds: [{ guildId: '219', expiresAt: NOW + 3000 }],
+		});
+		const r = evaluateTokenEligibility(t, 'default', ROUTE, NOW, '219');
+		expect(r).toEqual({ ok: false, reason: 'cooldown', retryAfter: 2000 });
 	});
 });
 

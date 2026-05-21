@@ -137,8 +137,20 @@ For each request the proxy decides which Discord token to use:
 Once a user-token branch is selected:
 
 - **`AUTH_KEY` -> `default` slot**, **`AUTH_KEY_PREMIUM` -> `premium` slot.** The static token (`DISCORD_TOKEN_USER` / `DISCORD_TOKEN_USER_PREMIUM`) is the default for that slot.
-- **On allow-listed read paths** (`/guilds/:id/messages/search`, `/guilds/:id/members*`, `/channels/:id/messages*`, etc.), the token rotator middleware acquires a registered pool token in the matching slot instead. Empty-slot pools return 503 so operator misconfiguration is visible (no silent downgrade to the static token).
+- **On allow-listed read paths** (`/guilds/:id/messages/search`, `/guilds/:id/members*`, `/channels/:id/messages*`, etc.), the token rotator middleware acquires a registered pool token in the matching slot. When no tokens are registered for the slot, the rotator falls through to the static token instead of erroring - `bun run dev` and ad-hoc extraction scripts work with zero registration.
 - **Premium pool isolation.** `default` consumers never see `premium` tokens and vice versa - premium tokens are handpicked higher-access accounts, not a throughput tier.
+
+#### Per-request override: `X-Proxy-Token`
+
+Override the default LRU selection on a per-request basis with an optional `X-Proxy-Token` request header:
+
+| Value | Behavior |
+|---|---|
+| absent / `auto` | Default LRU rotation across registered pool tokens (current behavior) |
+| `static` | Skip the rotator entirely - use the static `DISCORD_TOKEN_USER` / `DISCORD_TOKEN_USER_PREMIUM` on context |
+| `<label>` | Pin to that specific registered pool token via `acquireByLabel`. Returns 503 if the label is missing, status is not active, or the slot mismatches; returns 429 if the labeled token is in cooldown |
+
+The header is consumed by the rotator middleware and stripped before the request is forwarded to Discord. Auth-gated by the existing `AUTH_KEY` chain; no separate admin auth needed. Use cases: pin a specific token for debugging which one is misbehaving, force-bypass the pool for predictable extraction with the static token, or run `bun run dev` against a single registered local token.
 
 ### Fingerprint Hygiene
 
@@ -219,7 +231,7 @@ Returns `{ "tally": 0 }`. Placeholder for now. Not yet imported from my private 
 ## Testing
 
 ```bash
-bun run test           # Run all 312 tests across 27 suites
+bun run test           # Run all 348 tests across 29 suites
 bun run test -- --ui   # Open Vitest UI
 ```
 

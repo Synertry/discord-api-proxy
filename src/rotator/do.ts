@@ -29,7 +29,7 @@ import { DurableObject } from 'cloudflare:workers';
 import type { Bindings } from '../types';
 import { BUILD_NUMBER_META_KEY, type BuildNumberRecord } from '../fingerprint/build-number';
 import { FALLBACK_PROFILE_ID, listProfileIds, lookupProfile } from '../fingerprint/profiles';
-import { chooseToken } from './selection';
+import { chooseToken, evaluateTokenEligibility } from './selection';
 import { evictOldestBucketsIfOverCap, pruneIneligibleGuilds } from './validators';
 import type {
 	AcquireResult,
@@ -137,6 +137,55 @@ export class TokenPoolDO extends DurableObject<Bindings> {
 		t.inFlightCount += 1;
 
 		// First-use fingerprint assignment, persisted immediately.
+		if (!t.fingerprintProfileId) {
+			t.fingerprintProfileId = pickProfileId(t.label, listProfileIds());
+		}
+
+		await this.ctx.storage.put(`${TOKEN_KEY_PREFIX}${t.label}`, t);
+
+		return {
+			ok: true,
+			label: t.label,
+			tokenSecret: t.tokenSecret,
+			requestId: crypto.randomUUID(),
+			fingerprintProfileId: t.fingerprintProfileId,
+		};
+	}
+
+	/**
+	 * Acquire a specific token by label - the pin-to-label path used by the
+	 * `X-Proxy-Token: <label>` request header. Same mutations as `acquire` on
+	 * success; same eligibility semantics enforced by `evaluateTokenEligibility`.
+	 *
+	 * Returns `{ ok: false, reason: 'no-eligible-token' }` when the label does
+	 * not exist, the slot mismatches, the status is not active, or the requested
+	 * guild is permanently outside this token's whitelist. Returns
+	 * `{ ok: false, reason: 'cooldown', retryAfter }` for time-bounded constraints
+	 * (globalCooldownUntil, bucket cooling, ineligibleGuilds TTL).
+	 */
+	async acquireByLabel(
+		label: string,
+		slot: Slot,
+		routeKey: RouteKey,
+		guildId?: string,
+	): Promise<AcquireResult> {
+		const now = Date.now();
+		const t = await this.ctx.storage.get<TokenState>(`${TOKEN_KEY_PREFIX}${label}`);
+		if (!t) {
+			return { ok: false, reason: 'no-eligible-token', retryAfter: 60_000 };
+		}
+
+		const verdict = evaluateTokenEligibility(t, slot, routeKey, now, guildId);
+		if (!verdict.ok) {
+			if (verdict.reason === 'cooldown') {
+				return { ok: false, reason: 'cooldown', retryAfter: verdict.retryAfter };
+			}
+			return { ok: false, reason: 'no-eligible-token', retryAfter: 60_000 };
+		}
+
+		t.lastUsedAt = now;
+		t.inFlightCount += 1;
+
 		if (!t.fingerprintProfileId) {
 			t.fingerprintProfileId = pickProfileId(t.label, listProfileIds());
 		}

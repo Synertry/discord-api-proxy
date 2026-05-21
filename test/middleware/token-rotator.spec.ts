@@ -108,13 +108,14 @@ describe('tokenRotatorMiddleware', () => {
 		expect(res.headers.get('Retry-After')).toBe('5');
 	});
 
-	it('returns 503 when the pool is empty', async () => {
+	it('falls through to the static token when the pool is empty (graceful fallback)', async () => {
 		const client = mockClientReturning({ ok: false, reason: 'empty-pool', retryAfter: 60_000 });
 		const app = buildApp(client);
 		const res = await app.request('http://localhost/guilds/219564597349318656/messages/search', {}, MOCK_ENV);
-		expect(res.status).toBe(503);
-		const body = (await res.json()) as { error: string; reason: string };
-		expect(body.reason).toBe('empty-pool');
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { discordToken: string; acquiredLabel: string | null };
+		expect(body.discordToken).toBe('STATIC_USER');
+		expect(body.acquiredLabel).toBeNull();
 	});
 
 	it('returns 503 when the DO acquire throws (e.g. binding misconfigured)', async () => {
@@ -139,5 +140,110 @@ describe('tokenRotatorMiddleware', () => {
 		);
 		expect(res.status).toBe(200);
 		expect(acquire).not.toHaveBeenCalled();
+	});
+
+	it('X-Proxy-Token: static skips the rotator entirely', async () => {
+		const acquire = vi.fn();
+		const acquireByLabel = vi.fn();
+		const app = buildApp({ acquire, acquireByLabel, release: vi.fn() });
+		const res = await app.request(
+			'http://localhost/guilds/219564597349318656/messages/search',
+			{ headers: { 'X-Proxy-Token': 'static' } },
+			MOCK_ENV,
+		);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { discordToken: string; acquiredLabel: string | null };
+		expect(body.discordToken).toBe('STATIC_USER');
+		expect(body.acquiredLabel).toBeNull();
+		expect(acquire).not.toHaveBeenCalled();
+		expect(acquireByLabel).not.toHaveBeenCalled();
+	});
+
+	it('X-Proxy-Token: <label> pins via acquireByLabel', async () => {
+		const acquire = vi.fn();
+		const acquireByLabel = vi.fn(async () => ({
+			ok: true as const,
+			label: 'tok-local',
+			tokenSecret: 'PINNED_SECRET',
+			requestId: 'req-pin',
+			fingerprintProfileId: 'profile-chrome-win-de-1',
+		}));
+		const app = buildApp({ acquire, acquireByLabel, release: vi.fn() });
+		const res = await app.request(
+			'http://localhost/guilds/219564597349318656/messages/search',
+			{ headers: { 'X-Proxy-Token': 'tok-local' } },
+			MOCK_ENV,
+		);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { discordToken: string; acquiredLabel: string };
+		expect(body.discordToken).toBe('PINNED_SECRET');
+		expect(body.acquiredLabel).toBe('tok-local');
+		expect(acquire).not.toHaveBeenCalled();
+		expect(acquireByLabel).toHaveBeenCalledWith('tok-local', 'default', 'GET:/guilds/:id/messages/search', '219564597349318656');
+	});
+
+	it('X-Proxy-Token: <label> returns 503 when the label is not found', async () => {
+		const acquireByLabel = vi.fn(async () => ({
+			ok: false as const,
+			reason: 'no-eligible-token' as const,
+			retryAfter: 60_000,
+		}));
+		const app = buildApp({ acquire: vi.fn(), acquireByLabel, release: vi.fn() });
+		const res = await app.request(
+			'http://localhost/guilds/219564597349318656/messages/search',
+			{ headers: { 'X-Proxy-Token': 'nonexistent' } },
+			MOCK_ENV,
+		);
+		expect(res.status).toBe(503);
+		const body = (await res.json()) as { error: string; reason: string };
+		expect(body.reason).toBe('no-eligible-token');
+	});
+
+	it('X-Proxy-Token: <label> still 503s on empty-pool (no graceful fallback when pinned)', async () => {
+		const acquireByLabel = vi.fn(async () => ({
+			ok: false as const,
+			reason: 'no-eligible-token' as const,
+			retryAfter: 60_000,
+		}));
+		const app = buildApp({ acquire: vi.fn(), acquireByLabel, release: vi.fn() });
+		const res = await app.request(
+			'http://localhost/guilds/219564597349318656/messages/search',
+			{ headers: { 'X-Proxy-Token': 'tok-missing' } },
+			MOCK_ENV,
+		);
+		expect(res.status).toBe(503);
+	});
+
+	it('X-Proxy-Token: <label> returns 503 if the client mock lacks acquireByLabel', async () => {
+		// Old-style mock with only acquire/release. Middleware must not crash.
+		const app = buildApp({ acquire: vi.fn(), release: vi.fn() });
+		const res = await app.request(
+			'http://localhost/guilds/219564597349318656/messages/search',
+			{ headers: { 'X-Proxy-Token': 'tok-1' } },
+			MOCK_ENV,
+		);
+		expect(res.status).toBe(503);
+	});
+
+	it('X-Proxy-Token: auto behaves like absent header (LRU acquire)', async () => {
+		const acquire = vi.fn(async () => ({
+			ok: true as const,
+			label: 'lru',
+			tokenSecret: 'LRU_SECRET',
+			requestId: 'req-lru',
+			fingerprintProfileId: 'profile-chrome-win-de-1',
+		}));
+		const acquireByLabel = vi.fn();
+		const app = buildApp({ acquire, acquireByLabel, release: vi.fn() });
+		const res = await app.request(
+			'http://localhost/guilds/219564597349318656/messages/search',
+			{ headers: { 'X-Proxy-Token': 'auto' } },
+			MOCK_ENV,
+		);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { acquiredLabel: string };
+		expect(body.acquiredLabel).toBe('lru');
+		expect(acquire).toHaveBeenCalled();
+		expect(acquireByLabel).not.toHaveBeenCalled();
 	});
 });

@@ -8,9 +8,15 @@
 
 /**
  * @module rotator/selection
- * Pure function: given the full pool, pick the best token for the request.
+ * Pure eligibility + selection functions for the token pool.
  *
- * Extracted from the DO so it can be tested independently with synthetic
+ * - {@link evaluateTokenEligibility}: per-token eligibility check returning a
+ *   rich reason. Used by both `chooseToken` (LRU pick) and the DO's
+ *   `acquireByLabel` RPC (single-token pin).
+ * - {@link chooseToken}: filter the pool + pick LRU. Returns null + reason when
+ *   nothing fits.
+ *
+ * Extracted from the DO so callers can be tested independently with synthetic
  * TokenState arrays.
  */
 
@@ -23,16 +29,69 @@ export interface SelectionResult {
 }
 
 /**
+ * Per-token eligibility result. `cooldown` carries a `retryAfter` (ms from now)
+ * pointing to the soonest moment this token becomes eligible again.
+ * `no-eligible-token` means this token will never satisfy the request as-is
+ * (wrong slot, status != active, or guild-whitelist mismatch).
+ */
+export type EligibilityResult =
+	| { ok: true }
+	| { ok: false; reason: 'no-eligible-token' }
+	| { ok: false; reason: 'cooldown'; retryAfter: number };
+
+/**
+ * Evaluate whether a single token can satisfy `(slot, routeKey, guildId)` at
+ * time `now`. Pure - no side effects. Both `chooseToken` (LRU filter) and
+ * `acquireByLabel` (single-token check) call this for consistent semantics.
+ *
+ * Rules:
+ * 1. slot must match (strict isolation) -> no-eligible-token
+ * 2. status must be 'active' -> no-eligible-token
+ * 3. guildIds whitelist (if non-empty) must contain guildId -> no-eligible-token
+ *    (permanent constraint - retry will not help for this guild)
+ * 4. globalCooldownUntil > now -> cooldown(globalCooldownUntil - now)
+ * 5. bucket exhausted for this routeKey -> cooldown(resetAt - now)
+ * 6. ineligibleGuilds entry for guildId still in TTL -> cooldown(expiresAt - now)
+ *    (time-bounded; entries expire after 1h per do.ts:INELIGIBLE_GUILD_TTL_MS)
+ */
+export function evaluateTokenEligibility(
+	t: TokenState,
+	slot: Slot,
+	routeKey: RouteKey,
+	now: number,
+	guildId?: string,
+): EligibilityResult {
+	if (t.slot !== slot) return { ok: false, reason: 'no-eligible-token' };
+	if (t.status !== 'active') return { ok: false, reason: 'no-eligible-token' };
+	if (t.guildIds && t.guildIds.length > 0 && guildId && !t.guildIds.includes(guildId)) {
+		return { ok: false, reason: 'no-eligible-token' };
+	}
+
+	const candidates: number[] = [];
+
+	if (t.globalCooldownUntil > now) candidates.push(t.globalCooldownUntil);
+
+	const bucketHash = t.routeToBucket[routeKey];
+	if (bucketHash) {
+		const bs = t.bucketStates[bucketHash];
+		if (bs && bs.remaining <= 0 && bs.resetAt > now) candidates.push(bs.resetAt);
+	}
+
+	if (guildId) {
+		for (const g of t.ineligibleGuilds) {
+			if (g.guildId === guildId && g.expiresAt > now) candidates.push(g.expiresAt);
+		}
+	}
+
+	if (candidates.length === 0) return { ok: true };
+
+	const soonest = Math.min(...candidates);
+	return { ok: false, reason: 'cooldown', retryAfter: Math.max(0, soonest - now) };
+}
+
+/**
  * Apply all eligibility filters and pick the LRU token (preferring those with
  * `inFlightCount === 0`). Returns null + reason when nothing fits.
- *
- * Selection rules in order:
- * 1. slot must match (strict isolation)
- * 2. status must be 'active'
- * 3. globalCooldownUntil <= now
- * 4. token's known bucket for this routeKey (if any) must not be exhausted
- * 5. guildId (if provided) must not be in ineligibleGuilds with future expiresAt
- * 6. token's guildIds whitelist (if set) must contain guildId
  *
  * Tiebreak: smallest inFlightCount, then smallest lastUsedAt.
  */
@@ -51,18 +110,25 @@ export function chooseToken(
 		};
 	}
 
-	const eligible = slotPool.filter((t) => isEligible(t, routeKey, now, guildId));
+	const evaluations = slotPool.map((t) => ({
+		t,
+		e: evaluateTokenEligibility(t, slot, routeKey, now, guildId),
+	}));
+	const eligible = evaluations.filter(({ e }) => e.ok).map(({ t }) => t);
 
 	if (eligible.length === 0) {
-		// Distinguish "all currently cooling" from "no token has access at all"
-		const anyActive = slotPool.some((t) => t.status === 'active');
-		if (!anyActive) {
+		// If at least one token is in cooldown, surface cooldown with soonest retry;
+		// otherwise the slot is structurally blocked (all invalid / whitelist-mismatch).
+		const cooldowns = evaluations
+			.map(({ e }) => e)
+			.filter((e): e is { ok: false; reason: 'cooldown'; retryAfter: number } => !e.ok && e.reason === 'cooldown');
+		if (cooldowns.length === 0) {
 			return {
 				chosen: null,
 				unavailable: { ok: false, reason: 'no-eligible-token', retryAfter: 60_000 },
 			};
 		}
-		const retryAfter = computeRetryAfter(slotPool, routeKey, now, guildId);
+		const retryAfter = Math.min(...cooldowns.map((c) => c.retryAfter));
 		return {
 			chosen: null,
 			unavailable: { ok: false, reason: 'cooldown', retryAfter },
@@ -76,15 +142,7 @@ export function chooseToken(
 	return { chosen: sorted[0] };
 }
 
-function isEligible(t: TokenState, routeKey: RouteKey, now: number, guildId: string | undefined): boolean {
-	if (t.status !== 'active') return false;
-	if (t.globalCooldownUntil > now) return false;
-	if (isBucketCooling(t, routeKey, now)) return false;
-	if (guildId && isGuildIneligible(t, guildId, now)) return false;
-	if (t.guildIds && t.guildIds.length > 0 && guildId && !t.guildIds.includes(guildId)) return false;
-	return true;
-}
-
+/** Bucket cooling predicate. Exported for direct testing. */
 export function isBucketCooling(t: TokenState, routeKey: RouteKey, now: number): boolean {
 	const bucketHash = t.routeToBucket[routeKey];
 	if (!bucketHash) return false;
@@ -93,56 +151,10 @@ export function isBucketCooling(t: TokenState, routeKey: RouteKey, now: number):
 	return bs.remaining <= 0 && bs.resetAt > now;
 }
 
+/** Guild ineligibility predicate. Exported for direct testing. */
 export function isGuildIneligible(t: TokenState, guildId: string, now: number): boolean {
 	for (const g of t.ineligibleGuilds) {
 		if (g.guildId === guildId && g.expiresAt > now) return true;
 	}
 	return false;
-}
-
-/**
- * Among the slot's tokens, find the soonest moment when any of them becomes
- * eligible again. Returns the delta in ms from `now`. Used to populate
- * `retryAfter` on a `cooldown` AcquireUnavailable.
- */
-function computeRetryAfter(
-	slotPool: readonly TokenState[],
-	routeKey: RouteKey,
-	now: number,
-	guildId: string | undefined,
-): number {
-	let soonest = Number.POSITIVE_INFINITY;
-
-	for (const t of slotPool) {
-		if (t.status !== 'active') continue;
-		if (guildId && t.guildIds && t.guildIds.length > 0 && !t.guildIds.includes(guildId)) {
-			continue;
-		}
-
-		const candidates: number[] = [];
-		if (t.globalCooldownUntil > now) candidates.push(t.globalCooldownUntil);
-
-		const bucketHash = t.routeToBucket[routeKey];
-		if (bucketHash) {
-			const bs = t.bucketStates[bucketHash];
-			if (bs && bs.remaining <= 0 && bs.resetAt > now) candidates.push(bs.resetAt);
-		}
-
-		if (guildId) {
-			for (const g of t.ineligibleGuilds) {
-				if (g.guildId === guildId && g.expiresAt > now) candidates.push(g.expiresAt);
-			}
-		}
-
-		if (candidates.length === 0) {
-			// This token is already eligible; we shouldn't have been called.
-			// Be defensive: zero retry.
-			return 0;
-		}
-		const tokenSoonest = Math.min(...candidates);
-		if (tokenSoonest < soonest) soonest = tokenSoonest;
-	}
-
-	if (!Number.isFinite(soonest)) return 60_000;
-	return Math.max(0, soonest - now);
 }
