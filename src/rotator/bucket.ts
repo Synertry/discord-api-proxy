@@ -117,6 +117,7 @@ const ROTATABLE_ALLOWLIST = new Set<RouteKey>([
 	'GET:/guilds/:id/messages/search',
 	'GET:/channels/:id/messages',
 	'GET:/channels/:id/messages/:id',
+	'GET:/guilds/:id/channels',
 	'GET:/guilds/:id/members',
 	'GET:/guilds/:id/members/search',
 	'GET:/guilds/:id/members/:id',

@@ -20,6 +20,7 @@ import type { Bindings } from '../types';
 import type { DiscordContextVariables } from '../middleware/discord-context';
 import { kindnessCascadeRoutes } from '../custom/chillzone/events/kindness-cascade';
 import { bingoRoutes } from '../custom/chillzone/events/bingo';
+import { hearMeOutRoutes } from '../custom/chillzone/events/hear-me-out';
 
 /** Parent router for all custom (non-proxy) endpoints. */
 export const customRoutes = new OpenAPIHono<{ Bindings: Bindings; Variables: DiscordContextVariables }>();
@@ -48,6 +49,9 @@ customRoutes.openapi(cupidsInboxRoute, (c) => {
 
 // Mount Kindness Cascade routes under /chillzone/events/
 customRoutes.route('/chillzone/events', kindnessCascadeRoutes);
+
+// Mount Hear Me Out routes under /chillzone/events/
+customRoutes.route('/chillzone/events', hearMeOutRoutes);
 
 // Mount Bingo autotally routes under /chillzone/events/bingo/
 customRoutes.route('/chillzone/events/bingo', bingoRoutes);

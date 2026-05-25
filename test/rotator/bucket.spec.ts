@@ -68,6 +68,7 @@ describe('isRotatableRoute', () => {
 		['GET', '/guilds/219564597349318656/messages/search'],
 		['GET', '/channels/123456789012345678/messages'],
 		['GET', '/channels/123456789012345678/messages/987654321098765432'],
+		['GET', '/guilds/219564597349318656/channels'],
 		['GET', '/guilds/219564597349318656/members'],
 		['GET', '/guilds/219564597349318656/members/search?query=foo'],
 		['GET', '/guilds/219564597349318656/members/987654321098765432'],
