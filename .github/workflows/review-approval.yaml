@@ -8,6 +8,9 @@ on:
   pull_request:
     types:
         - labeled
+  issue_comment:
+    types:
+        - created
   workflow_dispatch:
     inputs:
       pr_number:
@@ -19,6 +22,11 @@ jobs:
   merge:
     name: Execute Fast-Forward Push
     runs-on: ubuntu-latest
+    # Without this job-level gate, every comment in the repo would trigger a
+    # runner. Pass through other event types and let step-level `if:`s decide.
+    if: |
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request != null && startsWith(github.event.comment.body, '/approve'))
     permissions:
       contents: write
       pull-requests: write
@@ -41,6 +49,36 @@ jobs:
           echo "BASE_REF=${{ github.event.pull_request.base.ref }}" >> "$GITHUB_OUTPUT"
           echo "HEAD_REF=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_OUTPUT"
 
+      - name: Verify Comment Author Permission
+        id: verify_commenter
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+        run: |
+          # Gate the command on the commenter's repo role. Triage is insufficient,
+          # only write/maintain/admin can trigger the fast-forward. Errors (e.g.
+          # commenter is not a collaborator at all) fall back to "none" so the gate
+          # fails closed.
+          PERMISSION=$(gh api "repos/${{ github.repository }}/collaborators/$COMMENT_USER/permission" --jq '.permission' 2>/dev/null || echo "none")
+          echo "Commenter '$COMMENT_USER' has permission '$PERMISSION'."
+          case "$PERMISSION" in
+            admin|maintain|write) echo "authorized=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "Insufficient permission. Halting." ;;
+          esac
+
+      - name: Extract Comment Command Data
+        id: comment_data
+        if: github.event_name == 'issue_comment' && steps.verify_commenter.outputs.authorized == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ github.event.issue.number }}
+        run: |
+          PR_JSON=$(gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json headRefOid,baseRefName,headRefName)
+          echo "TARGET_SHA=$(echo "$PR_JSON" | jq -r '.headRefOid')" >> "$GITHUB_OUTPUT"
+          echo "BASE_REF=$(echo "$PR_JSON" | jq -r '.baseRefName')" >> "$GITHUB_OUTPUT"
+          echo "HEAD_REF=$(echo "$PR_JSON" | jq -r '.headRefName')" >> "$GITHUB_OUTPUT"
+
       - name: Extract Manual Dispatch Data
         id: dispatch_data
         if: github.event_name == 'workflow_dispatch'
@@ -58,9 +96,9 @@ jobs:
         id: validate
         env:
           # Coalesce outputs: only the step that executed will return a value
-          TARGET_SHA: ${{ steps.review_data.outputs.TARGET_SHA || steps.label_data.outputs.TARGET_SHA || steps.dispatch_data.outputs.TARGET_SHA }}
-          BASE_REF: ${{ steps.review_data.outputs.BASE_REF || steps.label_data.outputs.BASE_REF || steps.dispatch_data.outputs.BASE_REF }}
-          HEAD_REF: ${{ steps.review_data.outputs.HEAD_REF || steps.label_data.outputs.HEAD_REF || steps.dispatch_data.outputs.HEAD_REF }}
+          TARGET_SHA: ${{ steps.review_data.outputs.TARGET_SHA || steps.label_data.outputs.TARGET_SHA || steps.comment_data.outputs.TARGET_SHA || steps.dispatch_data.outputs.TARGET_SHA }}
+          BASE_REF: ${{ steps.review_data.outputs.BASE_REF || steps.label_data.outputs.BASE_REF || steps.comment_data.outputs.BASE_REF || steps.dispatch_data.outputs.BASE_REF }}
+          HEAD_REF: ${{ steps.review_data.outputs.HEAD_REF || steps.label_data.outputs.HEAD_REF || steps.comment_data.outputs.HEAD_REF || steps.dispatch_data.outputs.HEAD_REF }}
         run: |
           if [ -z "$TARGET_SHA" ]; then
             echo "Trigger condition not met. Halting execution."
@@ -80,7 +118,7 @@ jobs:
         with:
           # A full clone is required to ensure the local runner has the correct references to push
           fetch-depth: 0
-          token: ${{ secrets.PAT }}  # PAT required — GITHUB_TOKEN pushes don't trigger workflows
+          token: ${{ secrets.PAT }}  # PAT required, GITHUB_TOKEN pushes don't trigger workflows
 
       - name: Fast-forward production branch
         if: steps.validate.outputs.validated_sha != ''
