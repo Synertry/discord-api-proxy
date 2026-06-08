@@ -114,7 +114,7 @@ jobs:
 
       - name: Checkout repository
         if: steps.validate.outputs.validated_sha != ''
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
         with:
           # A full clone is required to ensure the local runner has the correct references to push
           fetch-depth: 0
