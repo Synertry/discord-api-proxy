@@ -30,11 +30,11 @@
 	"dependencies": {
 		"@hono/swagger-ui": "^0.6.1",
 		"@hono/zod-openapi": "^1.4.0",
-		"hono": "^4.12.24",
+		"hono": "^4.12.25",
 		"yaml": "^2.9.0"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.16.13",
+		"@cloudflare/vitest-pool-workers": "^0.16.14",
 		"@types/node": "^25.9.2",
 		"typescript": "^6.0.3",
 		"vitest": "^4.1.8",
