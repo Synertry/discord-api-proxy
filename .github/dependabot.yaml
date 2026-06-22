@@ -31,6 +31,7 @@ updates:
       - 'workflow/dependabot'
       - 'workflow/auto-pr'
       - 'area/deps'
+      - 'type/chore'
     assignees:
       - Synertry
     commit-message:
@@ -62,6 +63,7 @@ updates:
       - 'workflow/dependabot'
       - 'workflow/auto-pr'
       - 'area/CI'
+      - 'type/chore'
     assignees:
       - Synertry
     commit-message:
