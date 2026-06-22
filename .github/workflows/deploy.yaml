@@ -25,9 +25,7 @@ jobs:
     # version-list, or promote step) still surfaces whatever was already
     # computed - the notify job degrades gracefully when fields are empty.
     outputs:
-      short_sha: ${{ steps.deploy.outputs.short_sha }}
       deploy_msg: ${{ steps.deploy.outputs.deploy_msg }}
-      version_id: ${{ steps.deploy.outputs.version_id }}
     steps:
       - uses: actions/checkout@v7.0.0
 
@@ -120,11 +118,10 @@ jobs:
           # We use Bash native substring ${var:offset:length} which handles UTF-8 better than cut
           DEPLOY_MSG="${SAFE_TITLE:0:50}"
 
-          # Emit metadata outputs IMMEDIATELY so the notify job has them even
-          # if upload/list/promote below fails. (Job outputs only flush on
+          # Emit the deploy message output IMMEDIATELY so the notify job has it
+          # even if upload/list/promote below fails. (Job outputs only flush on
           # successful step completion, but a failing step still flushes any
           # writes made before its non-zero exit.)
-          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
           echo "deploy_msg=$DEPLOY_MSG" >> "$GITHUB_OUTPUT"
 
           echo "📝 Message: $DEPLOY_MSG"
@@ -151,10 +148,6 @@ jobs:
             exit 1
           fi
 
-          # Emit the version_id output before the promote step so the notify
-          # job can report which version got uploaded even if promotion fails.
-          echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
-
           echo "✅ Found Version ID: $VERSION_ID"
 
           # --- 4. PROMOTE ---
@@ -174,8 +167,10 @@ jobs:
     with:
       status: ${{ needs.deploy.result }}
       sha: ${{ github.sha }}
-      short_sha: ${{ needs.deploy.outputs.short_sha }}
-      version_id: ${{ needs.deploy.outputs.version_id }}
+      # Previous production tip. The push to production fast-forwards main, so
+      # base_sha..sha is exactly the set of PRs this deploy ships. Empty/zero
+      # on a branch's first push, which notify.yaml degrades to a single line.
+      base_sha: ${{ github.event.before }}
       deploy_msg: ${{ needs.deploy.outputs.deploy_msg }}
       actor: ${{ github.actor }}
       commit_url: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}

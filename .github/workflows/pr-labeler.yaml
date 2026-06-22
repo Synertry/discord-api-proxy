@@ -13,6 +13,7 @@ permissions:
 jobs:
   triage:
     name: Triage PR
+    if: ${{ github.actor != 'dependabot[bot]' }} # Dependabot handles it's own labels in ../dependabot.yaml
     runs-on: ubuntu-latest
     steps:
       - uses: actions/labeler@v6.1.0
