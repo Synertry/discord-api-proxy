@@ -2,6 +2,17 @@
 # Invoked from deploy.yaml's final `notify` job with `needs.deploy.result` so
 # both successful and failed deploys produce an observable signal.
 #
+# Repo-agnostic by design: the embed identity (title, author link) is derived
+# from `github.repository`, which inside a `workflow_call` resolves to the
+# CALLER's repo. The same file is reused across multiple repositories without
+# edits, and each notification states which repo it came from.
+#
+# "What changed" at a glance: when the caller passes `base_sha` (the previous
+# deployed commit), the embed description lists every commit in
+# base_sha..sha, newest first, each linked to its PR. That turns a production
+# deploy (which fast-forwards many merged PRs) into a readable changelog
+# instead of just the single head commit title.
+#
 # Discord embed character limits (documented at
 # https://discord.com/developers/docs/resources/message#embed-object-embed-limits):
 #   title          <= 256
@@ -22,22 +33,17 @@ on:
       sha:
         required: true
         type: string
-        description: 'Full commit SHA being deployed'
-      short_sha:
+        description: 'Full commit SHA being deployed (changelog head)'
+      base_sha:
         required: false
         type: string
         default: ''
-        description: 'Truncated commit SHA (8 chars) used as the Cloudflare version tag'
-      version_id:
-        required: false
-        type: string
-        default: ''
-        description: 'Cloudflare Worker version ID returned by `wrangler versions upload`; empty on early failure'
+        description: 'Previous deployed commit SHA (e.g. github.event.before). When set, the description lists base_sha..sha as a per-PR changelog. Empty or an all-zero SHA falls back to the single head commit.'
       deploy_msg:
         required: false
         type: string
         default: ''
-        description: 'Commit title used as the Cloudflare deploy message; empty on early failure'
+        description: 'Commit title used as the Cloudflare deploy message; the changelog fallback when no base_sha is supplied'
       actor:
         required: true
         type: string
@@ -55,6 +61,10 @@ on:
         required: true
         description: 'Discord webhook URL receiving the embed'
 
+# Compare API (repos/{repo}/compare) needs read access to repository contents.
+permissions:
+  contents: read
+
 jobs:
   discord:
     name: Send Discord Notification
@@ -65,12 +75,16 @@ jobs:
         env:
           STATUS: ${{ inputs.status }}
           SHA: ${{ inputs.sha }}
-          SHORT_SHA: ${{ inputs.short_sha }}
-          VERSION_ID: ${{ inputs.version_id }}
+          BASE_SHA: ${{ inputs.base_sha }}
           DEPLOY_MSG: ${{ inputs.deploy_msg }}
           ACTOR: ${{ inputs.actor }}
           COMMIT_URL: ${{ inputs.commit_url }}
           RUN_URL: ${{ inputs.run_url }}
+          # Resolves to the caller's repo (owner/name) and host inside workflow_call.
+          REPO_FULL: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          # GITHUB_TOKEN of this reusable workflow; used by `gh api` for the compare call.
+          GH_TOKEN: ${{ github.token }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           set -euo pipefail
@@ -88,78 +102,128 @@ jobs:
             fi
           }
 
+          REPO_NAME="${REPO_FULL##*/}"
+          REPO_URL="${SERVER_URL}/${REPO_FULL}"
+
           # Map deploy result -> embed color (Discord RGB int) + title prefix.
+          # Repo name is dynamic so the same file serves every repository.
           case "$STATUS" in
             success)
               COLOR=5763719   # green
-              TITLE="✅ discord-api-proxy deployed"
+              TITLE="✅ ${REPO_NAME} deployed"
               ;;
             failure)
               COLOR=15548997  # red
-              TITLE="❌ discord-api-proxy deploy FAILED"
+              TITLE="❌ ${REPO_NAME} deploy FAILED"
               ;;
             cancelled)
               COLOR=9807270   # gray
-              TITLE="🟡 discord-api-proxy deploy cancelled"
+              TITLE="🟡 ${REPO_NAME} deploy cancelled"
               ;;
             *)
               COLOR=10181046  # purple - unexpected upstream result
-              TITLE="⚠️ discord-api-proxy deploy: $STATUS"
+              TITLE="⚠️ ${REPO_NAME} deploy: $STATUS"
               ;;
           esac
 
-          # Fall back to the first 7 chars of the full SHA if the short form
-          # never made it out of the deploy job (early failure).
-          DISPLAY_SHA="${SHORT_SHA:-${SHA:0:7}}"
+          # --- Build the "what changed" changelog ---------------------------
+          # When base_sha is a real commit (not empty, not the all-zero SHA of
+          # a branch's first push) and differs from head, ask the compare API
+          # for every commit in range and render them newest-first, each line
+          # linked to its PR. Any failure here degrades to the single-commit
+          # fallback below; the notify must never block on changelog problems.
+          CHANGELOG=""
+          if [ -n "$BASE_SHA" ] && ! printf '%s' "$BASE_SHA" | grep -qE '^0+$' \
+             && [ -n "$SHA" ] && [ "$BASE_SHA" != "$SHA" ]; then
+            COMPARE_JSON=$(gh api "repos/${REPO_FULL}/compare/${BASE_SHA}...${SHA}" 2>/dev/null || true)
+            if [ -n "$COMPARE_JSON" ]; then
+              # For each commit: take the title (first line), strip square
+              # brackets so they cannot break the markdown link, and link the
+              # title to its PR. The PR number is the LAST "#N" in the title,
+              # which is the squash-merge "(#90)" suffix or a merge commit's
+              # "#65"; commits with no "#N" link to the commit itself. The
+              # "[][]" character class matches "[" and "]" without backslash
+              # escaping, keeping the program robust across shell layers.
+              CHANGELOG=$(printf '%s' "$COMPARE_JSON" | jq -r --arg repo_url "$REPO_URL" '
+                (.commits // [])
+                | reverse
+                | .[0:20]
+                | map(
+                    ((.commit.message | split("\n")[0]) | gsub("[][]"; "")) as $title
+                    | ([ $title | scan("#([0-9]+)") ] | (.[-1][0] // null)) as $pr
+                    | "- " + (
+                        if $pr != null
+                        then "[\($title)](\($repo_url)/pull/\($pr))"
+                        else "[\($title)](\(.html_url))"
+                        end
+                      )
+                  )
+                | join("\n")
+              ' 2>/dev/null || true)
 
-          # Description carries the commit title. May be empty on early failure.
-          DESC="${DEPLOY_MSG:-(no commit message captured)}"
+              TOTAL=$(printf '%s' "$COMPARE_JSON" | jq -r '(.commits // []) | length' 2>/dev/null || echo 0)
+              if [ -n "$CHANGELOG" ] && [ "${TOTAL:-0}" -gt 20 ]; then
+                CHANGELOG="${CHANGELOG}"$'\n'"_...and $((TOTAL - 20)) more commits_"
+              fi
+            fi
+          fi
 
-          # Field values. Each is hard-capped to 1024 below.
-          COMMIT_FIELD="[\`${DISPLAY_SHA}\`](${COMMIT_URL})"
+          # Description: the changelog when we have one, otherwise a single
+          # bulleted line from the head commit so the style stays consistent.
+          if [ -n "$CHANGELOG" ]; then
+            DESC="$CHANGELOG"
+          elif [ -n "$DEPLOY_MSG" ]; then
+            DESC="- [${DEPLOY_MSG}](${COMMIT_URL})"
+          else
+            DESC="(no commit details available)"
+          fi
+
+          # Field values. Each is hard-capped to 1024 below. The deployed SHA
+          # and Cloudflare version UUID are deliberately omitted: the changelog
+          # already links every commit/PR, and a raw version UUID is not
+          # actionable from the notification.
           AUTHOR_FIELD="$ACTOR"
-          VERSION_FIELD="${VERSION_ID:-_(not assigned)_}"
           LOGS_FIELD="[View workflow run](${RUN_URL})"
 
           # Apply Discord's per-element character limits.
           TITLE=$(truncate_str "$TITLE" 256)
           DESC=$(truncate_str "$DESC" 4096)
-          COMMIT_FIELD=$(truncate_str "$COMMIT_FIELD" 1024)
           AUTHOR_FIELD=$(truncate_str "$AUTHOR_FIELD" 1024)
-          VERSION_FIELD=$(truncate_str "$VERSION_FIELD" 1024)
           LOGS_FIELD=$(truncate_str "$LOGS_FIELD" 1024)
 
           # Build the JSON payload via jq so quotes, newlines, and unicode are
-          # escaped correctly regardless of what came in from the commit title.
+          # escaped correctly regardless of what came in from the commit titles.
           #
           # `username` constraints (Discord users docs): 2-32 chars, no `@` `#`
           # `:` backtick or `discord` substring, not `everyone` / `here`.
-          # We use a generic sender name; the embed title already identifies
-          # the project.
+          # We use a generic sender name; the embed author identifies the repo.
           jq -n \
             --arg title "$TITLE" \
             --arg desc "$DESC" \
             --arg url "$RUN_URL" \
             --argjson color "$COLOR" \
             --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg commit "$COMMIT_FIELD" \
+            --arg repo_full "$REPO_FULL" \
+            --arg repo_url "$REPO_URL" \
             --arg author "$AUTHOR_FIELD" \
-            --arg version "$VERSION_FIELD" \
             --arg logs "$LOGS_FIELD" \
             '{
               username: "GitHub Actions",
               avatar_url: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
               embeds: [{
+                author: {
+                  name: $repo_full,
+                  url: $repo_url,
+                  icon_url: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png"
+                },
                 title: $title,
                 description: $desc,
                 url: $url,
                 color: $color,
                 timestamp: $timestamp,
                 fields: [
-                  { name: "Commit",  value: $commit,  inline: true },
-                  { name: "Author",  value: $author,  inline: true },
-                  { name: "Version", value: $version, inline: true },
-                  { name: "Logs",    value: $logs,    inline: false }
+                  { name: "Triggered by", value: $author, inline: true },
+                  { name: "Logs",         value: $logs,   inline: true }
                 ],
                 footer: {
                   text: "Cloudflare Worker deploy via GitHub Actions"
