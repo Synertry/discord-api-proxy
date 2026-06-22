@@ -20,7 +20,7 @@ jobs:
             is_dependabot: ${{ steps.detect_dependabot.outputs.is_dependabot }}
         steps:
             - name: Checkout
-              uses: actions/checkout@v6.0.3
+              uses: actions/checkout@v7.0.0
               with:
                 fetch-depth: 2 # fetch last two commits to compare
 
@@ -94,7 +94,7 @@ jobs:
         GH_TOKEN: ${{ secrets.PAT }}
       steps:
         - name: Checkout code
-          uses: actions/checkout@v6.0.3
+          uses: actions/checkout@v7.0.0
           with:
             fetch-depth: 0 # We need this if dependabot pushes multiple bumps at once # TODO: Gateway this later
             token: ${{ secrets.PAT }} # Use PAT so that the push to production triggers deploy.yaml (GITHUB_TOKEN pushes do not trigger workflows)
