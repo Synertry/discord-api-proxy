@@ -34,10 +34,10 @@
 		"yaml": "^2.9.0"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.16.20",
+		"@cloudflare/vitest-pool-workers": "^0.17.0",
 		"@types/node": "^25.9.4",
 		"typescript": "^6.0.3",
 		"vitest": "^4.1.9",
-		"wrangler": "^4.104.0"
+		"wrangler": "^4.106.0"
 	}
 }
