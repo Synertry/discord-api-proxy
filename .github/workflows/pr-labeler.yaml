@@ -16,7 +16,7 @@ jobs:
     if: ${{ github.actor != 'dependabot[bot]' }} # Dependabot handles it's own labels in ../dependabot.yaml
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/labeler@v6.1.0
+      - uses: actions/labeler@v6.2.0
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           configuration-path: .github/labels.yaml
