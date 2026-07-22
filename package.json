@@ -29,8 +29,8 @@
 	},
 	"dependencies": {
 		"@hono/swagger-ui": "^0.6.1",
-		"@hono/zod-openapi": "^1.5.0",
-		"hono": "^4.12.30",
+		"@hono/zod-openapi": "^1.5.1",
+		"hono": "^4.12.31",
 		"yaml": "^2.9.0"
 	},
 	"devDependencies": {
@@ -38,6 +38,6 @@
 		"@types/node": "^26.1.1",
 		"typescript": "^6.0.3",
 		"vitest": "^4.1.10",
-		"wrangler": "^4.107.1"
+		"wrangler": "^4.111.0"
 	}
 }
