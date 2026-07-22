@@ -28,7 +28,7 @@ jobs:
     needs: triage
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
       - name: Label PR based on size
         uses: cbrgm/pr-size-labeler-action@v1.3.10
         with:
