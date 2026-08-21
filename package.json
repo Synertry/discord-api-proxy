@@ -29,15 +29,15 @@
 	},
 	"dependencies": {
 		"@hono/swagger-ui": "^0.6.1",
-		"@hono/zod-openapi": "^1.5.3",
-		"hono": "^4.13.2",
+		"@hono/zod-openapi": "^1.6.0",
+		"hono": "^4.13.3",
 		"yaml": "^2.9.0"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.21.3",
 		"@types/node": "^26.2.0",
 		"typescript": "^7.0.2",
-		"vitest": "^4.1.10",
+		"vitest": "^4.1.11",
 		"wrangler": "^4.122.0"
 	}
 }
