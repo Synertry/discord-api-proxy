@@ -261,4 +261,42 @@ describe('fetchAllMessages: 429 retry', () => {
     // MAX_429_RETRIES=3 -> 4 total attempts (1 initial + 3 retries).
     expect(mockFetch).toHaveBeenCalledTimes(4);
   });
+
+  it('paces the NEXT page off the retry dispatch time, not the pre-retry timestamp', async () => {
+    vi.useFakeTimers();
+    try {
+      // Page 1's first attempt 429s; the internal retry (after a real
+      // retryDelayMs wait) succeeds with a full page, so a page 2 is fetched.
+      // Before the fix, the outer loop paced page 2 off the timestamp taken
+      // BEFORE page 1's first attempt - since the internal retry wait alone
+      // already exceeds minGapMs, that stale timestamp made the pacing
+      // check see enough elapsed time and skip waiting before page 2
+      // entirely. After the fix, pacing is measured from the retry's actual
+      // dispatch, so a full 1000ms wait is still required before page 2.
+      let call = 0;
+      const mockFetch = vi.fn(async () => {
+        call += 1;
+        if (call === 1) return new Response('Rate limited', { status: 429, headers: { 'Retry-After': '2' } });
+        if (call === 2) return jsonPage(generateMessages(100, 3000)); // retry succeeds, full page
+        return jsonPage([]); // page 2
+      });
+      const waitedMs: number[] = [];
+      const wait = vi.fn(async (ms: number) => {
+        waitedMs.push(ms);
+        await vi.advanceTimersByTimeAsync(ms); // simulate the real elapsed time a genuine wait would consume
+      });
+      await fetchAllMessages<TestMessage>(baseOpts({ fetcher: mockFetch as unknown as typeof fetch, wait }));
+
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      // First wait: the internal 429 retry backoff (retryDelayMs: 2000ms * 1.5 = 3000ms).
+      expect(waitedMs[0]).toBe(3000);
+      // Second wait: pacing before page 2, measured from the retry's own
+      // dispatch (not the original pre-429 timestamp) - still a near-full
+      // 1000ms gap, not skipped.
+      expect(waitedMs.length).toBeGreaterThanOrEqual(2);
+      expect(waitedMs[1]).toBeGreaterThanOrEqual(1000 - 5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

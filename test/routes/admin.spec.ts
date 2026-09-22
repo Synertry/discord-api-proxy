@@ -9,6 +9,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { env } from 'cloudflare:test';
 import { createApp } from '../../src/index';
+import { pickProfileId } from '../../src/rotator/do';
+import { listProfileIds } from '../../src/fingerprint/profiles';
 
 const VALID_TOKEN = 'A'.repeat(40) + '.' + 'B'.repeat(10) + '.' + 'C'.repeat(40);
 const VALID_TOKEN_2 = 'D'.repeat(40) + '.' + 'E'.repeat(10) + '.' + 'F'.repeat(40);
@@ -294,8 +296,18 @@ describe('admin fingerprint endpoints', () => {
     expect(setBody.profileId).toBe('custom');
 
     const got = await adminGet(app, '/admin/static-fingerprint');
-    const body = (await got.json()) as { userPremium: { profileId: string } | null };
+    const body = (await got.json()) as {
+      userPremium: { profileId: string; assignedAt: number; custom?: { userAgent: string; os: string; browser: string } } | null;
+    };
     expect(body.userPremium?.profileId).toBe('custom');
+    // Compact summary only - the full superProperties/clientHints blob a
+    // custom registration carries must never leak through this listing.
+    expect(body.userPremium?.custom?.userAgent).toBe(userAgent);
+    expect(body.userPremium?.custom?.os).toBe('Windows');
+    expect(body.userPremium).not.toHaveProperty('clientHints');
+    expect(body.userPremium?.custom).not.toHaveProperty('clientHints');
+    expect(body.userPremium?.custom).not.toHaveProperty('superProperties');
+    expect(body.userPremium?.custom).not.toHaveProperty('browser_version');
   });
 
   it('POST /admin/static-fingerprint rejects an invalid custom profile with the validator reason', async () => {
@@ -387,6 +399,21 @@ describe('admin GET /admin/identity', () => {
     const body = (await res.json()) as { identityKey: string; headers: Record<string, string> };
     expect(body.identityKey).toBe(`pool:${label}`);
     expect(body.headers.authorization).toBe('<redacted>');
+  });
+
+  it('previews the deterministic label-hash profile a first acquire() will assign, for a never-acquired label', async () => {
+    const app = admin();
+    const label = nextLabel();
+    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: VALID_TOKEN });
+    // Registering does NOT acquire the token, so fingerprintProfileId is still
+    // unset at this point - the preview must resolve the SAME profile a real
+    // first acquire() would assign via pickProfileId, not the unrelated
+    // fallback template.
+    const expectedProfileId = pickProfileId(label, listProfileIds());
+    const res = await adminGet(app, `/admin/identity?label=${label}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { profileId: string };
+    expect(body.profileId).toBe(expectedProfileId);
   });
 
   it('returns 404 for an unregistered label', async () => {

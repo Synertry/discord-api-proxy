@@ -713,6 +713,22 @@ describe('TokenPoolDO static-identity guard: prepareStatic / leaseStatic / settl
     if (!first.ok) throw new Error('expected first lease to succeed');
     await stub.settleStatic(HASH_A, first.requestId, { status: 200, routeKey: 'GET:/concurrent-0' });
 
+    // Force lastDispatchAt far into the future: under full-suite load, the
+    // four leaseStatic RPC round-trips in the loop below can themselves
+    // cumulatively consume real wall-clock time approaching or exceeding
+    // MIN_DISPATCH_GAP_MS, which would let a later attempt legitimately
+    // clear the gap on its own. A 60s-future timestamp gives every attempt
+    // in the loop a wide safety margin regardless of RPC latency, without
+    // touching the MIN_DISPATCH_GAP_MS behavior under test.
+    await runInDurableObject(stub, async (_instance, state) => {
+      const key = `${STATIC_GUARD_PREFIX}${HASH_A}`;
+      const guard = await state.storage.get<{ lastDispatchAt: number }>(key);
+      if (guard) {
+        guard.lastDispatchAt = Date.now() + 60_000;
+        await state.storage.put(key, guard);
+      }
+    });
+
     // Immediately (no wait) attempt 4 more leases on the SAME identity - all
     // must be blocked by MIN_DISPATCH_GAP_MS.
     for (let i = 1; i < 5; i++) {
