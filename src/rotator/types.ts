@@ -292,17 +292,37 @@ export interface RequestIdentity {
 }
 
 /**
+ * Recorded by the identity middleware when the route is pool-eligible
+ * (rotatable, and the caller didn't explicitly pin `X-Proxy-Token: static`).
+ * Carries everything `proxy.ts` needs to attempt `acquire`/`acquireByLabel`
+ * itself, immediately before dispatch - the middleware never calls them, so
+ * no pool lease is ever granted anywhere but the point of use.
+ */
+export interface PoolPlan {
+  slot: Slot;
+  /** `'auto'` for LRU selection, or a specific label to pin via `acquireByLabel`. */
+  selector: 'auto' | { label: string };
+  routeKey: RouteKey;
+  guildId?: string;
+}
+
+/**
  * Hono context variables set by the identity middleware.
  * Intersected with `AuthVariables & DiscordContextVariables` at the app level.
  */
 export interface RotatorVariables {
-  /** Set when the identity middleware acquired a pool token. Triggers release in proxy.ts. */
-  acquiredLabel?: string;
-  acquiredRequestId?: string;
-  /** Resolved identity for this request. Set for both pool and static paths. */
+  /**
+   * Fallback identity for this request, resolved read-only by the
+   * middleware via `prepareStatic` - always set for non-bot requests. When
+   * `poolPlan` is also set and its `acquire`/`acquireByLabel` call succeeds,
+   * `proxy.ts` uses the pool-resolved identity instead of this one; on an
+   * `empty-pool`/`no-eligible-token` fallback, this is what gets used.
+   */
   identity?: RequestIdentity;
-  /** Live client versions resolved for this request (pool: from the DO; static: from `prepareStatic`). */
+  /** Live client versions resolved for this request (DO-wide, not identity-specific, so the same value is valid for either path). */
   clientVersions?: ClientVersions;
+  /** Set only when the route is pool-eligible; absent means static-only (proxy.ts must use `identity` above and `leaseStatic`/`settleStatic`). */
+  poolPlan?: PoolPlan;
   /** Lazily-constructed client. Tests inject via createApp(_, mockTokenPool). */
   tokenPoolClient?: TokenPoolClient;
 }

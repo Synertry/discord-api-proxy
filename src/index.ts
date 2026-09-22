@@ -27,7 +27,7 @@ import { authMiddleware } from './middleware/auth';
 import { discordContextMiddleware } from './middleware/discord-context';
 import { snowflakeValidatorMiddleware } from './middleware/snowflake-validator';
 import { subrequestLoggerMiddleware } from './middleware/subrequest-logger';
-import { tokenRotatorMiddleware } from './middleware/token-rotator';
+import { identityMiddleware } from './middleware/identity';
 
 import { customRoutes } from './routes/custom';
 import { proxyRoute } from './routes/proxy';
@@ -116,11 +116,11 @@ export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolCli
   // Sieve Layer 3: Context Parsing (token selection + user-agent)
   app.use('*', discordContextMiddleware);
 
-  // Sieve Layer 3.5: Token-pool rotator (acquire on rotatable paths)
-  // Runs after discord-context so c.var.discordToken has a static-token
-  // fallback in place; runs before snowflake-validator so an invalid path
-  // never costs us a token acquisition.
-  app.use('*', tokenRotatorMiddleware);
+  // Sieve Layer 3.5: Identity resolution (fingerprint/versions; never
+  // acquires or leases - only reads). Runs after discord-context so
+  // c.var.discordToken has a static-token fallback in place; runs before
+  // snowflake-validator so an invalid path never costs a DO round trip.
+  app.use('*', identityMiddleware);
 
   // Sieve Layer 4: Snowflake Validation (Discord ID format checks)
   app.use('*', snowflakeValidatorMiddleware);
@@ -147,8 +147,8 @@ export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolCli
 /** Worker entry: fetch handler + daily scheduled scraper for the Discord build_number. */
 const app = createApp();
 export default {
-	fetch: app.fetch.bind(app),
-	scheduled: async (_event: ScheduledController, env: Bindings, _ctx: ExecutionContext): Promise<void> => {
-		await scheduledBuildNumberHandler(env);
-	},
+  fetch: app.fetch.bind(app),
+  scheduled: async (_event: ScheduledController, env: Bindings, _ctx: ExecutionContext): Promise<void> => {
+    await scheduledBuildNumberHandler(env);
+  },
 };
