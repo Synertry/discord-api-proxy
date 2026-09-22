@@ -107,11 +107,11 @@ export interface ResolvedProfile {
   superProperties: StaticSuperProperties;
 }
 
-const BY_ID: Readonly<Record<string, ProfileTemplate>> = Object.fromEntries(PROFILES.map((p) => [p.id, p]));
+const BY_ID: ReadonlyMap<string, ProfileTemplate> = new Map(PROFILES.map((p) => [p.id, p]));
 
-/** Look up a profile template by id. Returns undefined for unknown ids (including retired registry ids from before the template rewrite). */
+/** Look up a profile template by id. Returns undefined for unknown ids (including retired registry ids from before the template rewrite, and any non-registry string such as an inherited Object.prototype name). */
 export function lookupProfile(id: string): ProfileTemplate | undefined {
-  return BY_ID[id];
+  return BY_ID.get(id);
 }
 
 /** Return all template ids in their declared order. Non-secret operator metadata. */
@@ -172,6 +172,20 @@ export function resolveCustom(custom: CustomProfile): ResolvedProfile {
 export type ValidateCustomProfileResult = { ok: true; profile: CustomProfile } | { ok: false; reason: string };
 
 /**
+ * Header-value safety check for a direct (non-base64-encoded) header field:
+ * printable ASCII only, rejecting CR/LF/control characters (which would make
+ * `Headers.set` throw downstream, or in a less strict host, enable header
+ * splitting) and non-ByteString/Unicode characters, plus a practical length
+ * ceiling. Real User-Agent strings, BCP-47 locale tags, IANA timezone names,
+ * and Sec-CH-UA-family client hints are always printable ASCII, so this is
+ * not a functional restriction on legitimate captures.
+ */
+function isHeaderSafeValue(value: string, maxLen: number): boolean {
+  if (value.length === 0 || value.length > maxLen) return false;
+  return /^[\x20-\x7E]+$/.test(value);
+}
+
+/**
  * Validate an admin-submitted custom profile. `superProperties` may be a
  * plain object or a base64 string (the same shape the real `X-Super-Properties`
  * header carries), since operators typically paste the header value verbatim.
@@ -181,23 +195,41 @@ export type ValidateCustomProfileResult = { ok: true; profile: CustomProfile } |
  * `client_event_source`, `client_launch_id`, `launch_signature`,
  * `client_heartbeat_session_id`, `client_app_state`, or anything else not on
  * the allowlist) is dropped, never stored, and never echoed back.
+ *
+ * `userAgent`, `locale`, `timezone`, and the three client hints become raw
+ * (non-base64) outbound header values via `compose.ts`, so each is checked
+ * with `isHeaderSafeValue` - not just type/non-emptiness - to stop a
+ * malformed admin registration from persisting a value that makes every
+ * later request (and the identity preview) for that static kind throw on an
+ * invalid `Headers.set` call. `superProperties`' other fields are always
+ * base64-encoded before they ever reach a header, so they only need the
+ * type checks already below.
  */
 export function validateCustomProfile(input: unknown): ValidateCustomProfileResult {
   if (typeof input !== 'object' || input === null) return { ok: false, reason: 'input-not-object' };
   const candidate = input as Record<string, unknown>;
 
-  if (typeof candidate.userAgent !== 'string' || candidate.userAgent.length < 20 || candidate.userAgent.length > 512) {
+  if (typeof candidate.userAgent !== 'string' || !isHeaderSafeValue(candidate.userAgent, 512) || candidate.userAgent.length < 20) {
     return { ok: false, reason: 'userAgent-invalid' };
   }
 
   let rawSuperProperties: Record<string, unknown>;
   if (typeof candidate.superProperties === 'string') {
+    let decoded: unknown;
     try {
-      rawSuperProperties = JSON.parse(atob(candidate.superProperties)) as Record<string, unknown>;
+      decoded = JSON.parse(atob(candidate.superProperties));
     } catch {
       return { ok: false, reason: 'superProperties-not-object' };
     }
-  } else if (typeof candidate.superProperties === 'object' && candidate.superProperties !== null) {
+    if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) {
+      return { ok: false, reason: 'superProperties-not-object' };
+    }
+    rawSuperProperties = decoded as Record<string, unknown>;
+  } else if (
+    typeof candidate.superProperties === 'object' &&
+    candidate.superProperties !== null &&
+    !Array.isArray(candidate.superProperties)
+  ) {
     rawSuperProperties = candidate.superProperties as Record<string, unknown>;
   } else {
     return { ok: false, reason: 'superProperties-not-object' };
@@ -215,22 +247,25 @@ export function validateCustomProfile(input: unknown): ValidateCustomProfileResu
   const hints = candidate.clientHints as Record<string, unknown>;
   if (
     typeof hints['Sec-CH-UA'] !== 'string' ||
-    !hints['Sec-CH-UA'] ||
+    !isHeaderSafeValue(hints['Sec-CH-UA'], 256) ||
     typeof hints['Sec-CH-UA-Mobile'] !== 'string' ||
-    !hints['Sec-CH-UA-Mobile'] ||
+    !isHeaderSafeValue(hints['Sec-CH-UA-Mobile'], 16) ||
     typeof hints['Sec-CH-UA-Platform'] !== 'string' ||
-    !hints['Sec-CH-UA-Platform']
+    !isHeaderSafeValue(hints['Sec-CH-UA-Platform'], 64)
   ) {
     return { ok: false, reason: 'clientHints-missing' };
   }
 
-  const locale =
-    typeof candidate.locale === 'string' && candidate.locale
-      ? candidate.locale
-      : typeof rawSuperProperties.system_locale === 'string'
-        ? rawSuperProperties.system_locale
-        : 'en-US';
+  const rawLocale = typeof candidate.locale === 'string' && candidate.locale ? candidate.locale : undefined;
+  const rawSystemLocale = typeof rawSuperProperties.system_locale === 'string' ? rawSuperProperties.system_locale : undefined;
+  const locale = rawLocale ?? rawSystemLocale ?? 'en-US';
+  if (!isHeaderSafeValue(locale, 64)) {
+    return { ok: false, reason: 'locale-invalid' };
+  }
   const timezone = typeof candidate.timezone === 'string' && candidate.timezone ? candidate.timezone : 'Europe/Berlin';
+  if (!isHeaderSafeValue(timezone, 64)) {
+    return { ok: false, reason: 'timezone-invalid' };
+  }
   const str = (v: unknown, fallback: string): string => (typeof v === 'string' ? v : fallback);
   const superProperties: StaticSuperProperties = {
     os: rawSuperProperties.os,

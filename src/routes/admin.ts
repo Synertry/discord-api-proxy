@@ -35,7 +35,14 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { createMiddleware } from 'hono/factory';
 import type { Bindings } from '../types';
-import { FALLBACK_PROFILE_ID, listProfileIds, resolveCustom, resolveProfileId, validateCustomProfile } from '../fingerprint/profiles';
+import {
+  FALLBACK_PROFILE_ID,
+  listProfileIds,
+  lookupProfile,
+  resolveCustom,
+  resolveProfileId,
+  validateCustomProfile,
+} from '../fingerprint/profiles';
 import { composeGatewayProperties, composeSuperProperties } from '../fingerprint/compose';
 import { composeRequestHeaders } from '../fingerprint/headers';
 import { resolveClientVersions } from '../fingerprint/versions';
@@ -43,7 +50,7 @@ import { deriveFingerprintSession } from '../fingerprint/session';
 import { refreshClientVersions } from '../scheduled/client-versions-refresh';
 import { createTokenPoolClient, getPoolStub } from '../rotator/client';
 import { hashToken } from '../rotator/token-hash';
-import { isKnownProfileId, type TokenPoolDO } from '../rotator/do';
+import { isKnownProfileId, pickProfileId, type TokenPoolDO } from '../rotator/do';
 import { enforcePoolCap, validateRegisterInput } from '../rotator/validators';
 import type { RegisterInput, StaticFingerprintRecord, StaticTokenKind } from '../rotator/types';
 
@@ -130,6 +137,27 @@ async function buildIdentityPreview(
     superProperties: composeSuperProperties(profile, versions, session),
     gatewayProperties: composeGatewayProperties(profile, versions, session),
   };
+}
+
+/** Project a `StaticFingerprintRecord` to the compact summary `GET /admin/static-fingerprint` returns: never the full `custom.superProperties`/`clientHints` blob, just enough to confirm what's registered. */
+function projectStaticFingerprint(
+  record: StaticFingerprintRecord | null,
+): { profileId: string; assignedAt: number; custom?: { userAgent: string; os: string; browser: string; locale: string; timezone: string } } | null {
+  if (!record) return null;
+  if (record.profileId === 'custom' && record.custom) {
+    return {
+      profileId: 'custom',
+      assignedAt: record.assignedAt,
+      custom: {
+        userAgent: record.custom.userAgent,
+        os: record.custom.superProperties.os,
+        browser: record.custom.superProperties.browser,
+        locale: record.custom.locale,
+        timezone: record.custom.timezone,
+      },
+    };
+  }
+  return { profileId: record.profileId, assignedAt: record.assignedAt };
 }
 
 /**
@@ -252,7 +280,10 @@ export function buildAdminRoutes(): OpenAPIHono<{ Bindings: Bindings }> {
   admin.get('/static-fingerprint', async (c) => {
     const stub = poolStub(c.env);
     const mapping = await stub.listStaticFingerprints();
-    return c.json(mapping);
+    return c.json({
+      userDefault: projectStaticFingerprint(mapping.userDefault),
+      userPremium: projectStaticFingerprint(mapping.userPremium),
+    });
   });
 
   // POST /admin/static-fingerprint - body is `{ kind, profileId }` (a known
@@ -358,7 +389,16 @@ export function buildAdminRoutes(): OpenAPIHono<{ Bindings: Bindings }> {
     if (!found) {
       return c.json({ error: 'label not found' }, 404);
     }
-    const profile = resolveProfileId(found.fingerprintProfileId, versions.chromeMajor);
+    // Mirror do.ts's acquire()-time assignment rule: a missing or retired
+    // profile id gets the same deterministic label-hash pick a real acquire
+    // would give it, not the unrelated fallback template - otherwise this
+    // preview would show a different identity than the token's first
+    // real request will actually get.
+    const profileId =
+      found.fingerprintProfileId && lookupProfile(found.fingerprintProfileId)
+        ? found.fingerprintProfileId
+        : pickProfileId(found.label, listProfileIds());
+    const profile = resolveProfileId(profileId, versions.chromeMajor);
     return c.json(await buildIdentityPreview(`pool:${found.label}`, profile, versions, now, 'user-default'));
   });
 

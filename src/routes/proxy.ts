@@ -119,7 +119,7 @@ proxyRoute.all('/*', async (c) => {
 
     // ---- Bot: no identity, no guard, no pool. ----
     if (kind === 'bot') {
-      const headers = await composeRequestHeaders({ token: c.var.discordToken, tokenKind: 'bot', buildHash: BUILD_HASH });
+      const headers = await composeRequestHeaders({ token: c.var.discordToken, tokenKind: 'bot', buildHash: BUILD_HASH, inbound: c.req.raw.headers });
       return await dispatch(fetcher, discordUrl, method, headers, bodyInit);
     }
 

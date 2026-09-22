@@ -100,10 +100,15 @@ export async function fetchAllMessages<T extends PagedMessage>(opts: PagerOption
       const elapsed = Date.now() - lastPageStartedAt;
       if (elapsed < minGapMs) await wait(minGapMs - elapsed);
     }
-    lastPageStartedAt = Date.now();
 
     const url = buildPageUrl(opts.channelId, opts.pageLimit, cursor);
-    const batch = await fetchOnePage<T>(url, opts, wait);
+    const { messages: batch, dispatchedAt } = await fetchOnePage<T>(url, opts, wait);
+    // Use the page's actual last dispatch time, not the pre-call timestamp:
+    // an internal 429 retry inside fetchOnePage already consumed real time
+    // waiting + re-dispatching, so pacing the NEXT page off the original
+    // pre-retry timestamp would under-count the true gap since the last
+    // real request.
+    lastPageStartedAt = dispatchedAt;
 
     if (batch.length === 0) break;
     const remaining = opts.maxMessages - allMessages.length;
@@ -129,10 +134,17 @@ function buildPageUrl(channelId: string, pageLimit: number, cursor: string | und
   return url;
 }
 
+/** One page's parsed messages plus the wall-clock time of the dispatch that actually returned them (the last attempt, after any internal 429 retries) - the caller paces the next page off this, not its own pre-call timestamp. */
+interface PageResult<T> {
+  messages: T[];
+  dispatchedAt: number;
+}
+
 /** Fetch and parse one page, leasing the guard immediately before and settling immediately after, with 429 and guard-block retry. */
-async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOptions, wait: (ms: number) => Promise<void>): Promise<T[]> {
+async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOptions, wait: (ms: number) => Promise<void>): Promise<PageResult<T>> {
   for (let attempt429 = 0; attempt429 <= MAX_429_RETRIES; attempt429++) {
     const lease = await leaseWithOneRetry(opts.guard, wait);
+    const dispatchedAt = Date.now();
 
     let response: Response;
     try {
@@ -166,7 +178,7 @@ async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOpti
     if (!Array.isArray(json)) {
       throw new DiscordApiError(response.status, 'Unexpected response format');
     }
-    return json as T[];
+    return { messages: json as T[], dispatchedAt };
   }
 
   throw new DiscordApiError(429, 'exhausted 429 retries');

@@ -37,6 +37,12 @@ describe('PROFILES registry', () => {
   it('lookupProfile returns undefined for an unknown id', () => {
     expect(lookupProfile('does-not-exist')).toBeUndefined();
   });
+
+  it('lookupProfile returns undefined for an inherited Object.prototype name (no prototype pollution)', () => {
+    expect(lookupProfile('toString')).toBeUndefined();
+    expect(lookupProfile('constructor')).toBeUndefined();
+    expect(lookupProfile('hasOwnProperty')).toBeUndefined();
+  });
 });
 
 describe('resolveTemplate', () => {
@@ -173,5 +179,43 @@ describe('validateCustomProfile / resolveCustom', () => {
     expect(resolved.id).toBe('custom');
     expect(resolved.userAgent).toBe(validInput.userAgent);
     expect(resolved.clientHints).toEqual(result.profile.clientHints);
+  });
+
+  it('rejects a CRLF-injected userAgent (header-splitting defense)', () => {
+    const result = validateCustomProfile({ ...validInput, userAgent: `${validInput.userAgent}\r\nX-Injected: evil` });
+    expect(result).toEqual({ ok: false, reason: 'userAgent-invalid' });
+  });
+
+  it('rejects a control character in a client hint', () => {
+    const result = validateCustomProfile({
+      ...validInput,
+      clientHints: { ...validInput.clientHints, 'Sec-CH-UA': '"Chromium";v="148"\n' },
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects a non-ASCII/unicode locale', () => {
+    const result = validateCustomProfile({ ...validInput, locale: 'en-US\u0000' });
+    expect(result).toEqual({ ok: false, reason: 'locale-invalid' });
+  });
+
+  it('rejects an oversized timezone value', () => {
+    const result = validateCustomProfile({ ...validInput, timezone: 'A'.repeat(65) });
+    expect(result).toEqual({ ok: false, reason: 'timezone-invalid' });
+  });
+
+  it('rejects base64 superProperties that decode to a JSON null instead of an object', () => {
+    const result = validateCustomProfile({ ...validInput, superProperties: btoa('null') });
+    expect(result).toEqual({ ok: false, reason: 'superProperties-not-object' });
+  });
+
+  it('rejects base64 superProperties that decode to a JSON array instead of an object', () => {
+    const result = validateCustomProfile({ ...validInput, superProperties: btoa('[]') });
+    expect(result).toEqual({ ok: false, reason: 'superProperties-not-object' });
+  });
+
+  it('rejects an inline (non-base64) superProperties array', () => {
+    const result = validateCustomProfile({ ...validInput, superProperties: [] });
+    expect(result).toEqual({ ok: false, reason: 'superProperties-not-object' });
   });
 });

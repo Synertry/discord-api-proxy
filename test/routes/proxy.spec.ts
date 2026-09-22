@@ -89,6 +89,21 @@ describe('Proxy Route (bot path)', () => {
     await app.request(new Request('http://localhost/users/@me', { headers: { 'x-auth-key': 'secret-key' } }), undefined, MOCK_ENV);
     expect(callInit(mockFetch).signal).toBeInstanceOf(AbortSignal);
   });
+
+  it('forwards allowlisted inbound headers on a bot POST/PATCH (e.g. Content-Type for a JSON body)', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: '1' }));
+    const app = createApp(mockFetch as unknown as typeof fetch);
+    const req = new Request('http://localhost/channels/123456789012345678/messages', {
+      method: 'POST',
+      headers: { 'x-auth-key': 'secret-key', 'content-type': 'application/json', 'x-audit-log-reason': 'automod' },
+      body: JSON.stringify({ content: 'hi' }),
+    });
+    const res = await app.request(req, undefined, MOCK_ENV);
+    expect(res.status).toBe(200);
+    const headers = callHeaders(mockFetch);
+    expect(headers.get('Content-Type')).toBe('application/json');
+    expect(headers.get('X-Audit-Log-Reason')).toBe('automod');
+  });
 });
 
 describe('Proxy Route (static user path, header allowlist + fingerprint)', () => {

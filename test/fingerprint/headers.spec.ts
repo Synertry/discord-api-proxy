@@ -49,6 +49,14 @@ describe('composeRequestHeaders', () => {
     expect(headers.get('x-audit-log-reason')).toBe('cleanup');
   });
 
+  it('drops an inbound header named after an Object.prototype member (no prototype pollution in the allowlist check)', async () => {
+    const inbound = new Headers({ constructor: 'evil', toString: 'evil', hasownproperty: 'evil' });
+    const headers = await composeRequestHeaders({ token: 'Bot abc', tokenKind: 'bot', buildHash: 'deadbeef', inbound, now: NOW });
+    expect(headers.has('constructor')).toBe(false);
+    expect(headers.has('toString')).toBe(false);
+    expect(headers.has('hasownproperty')).toBe(false);
+  });
+
   it('bot kind carries no super-properties/client-hint headers', async () => {
     const headers = await composeRequestHeaders({ token: 'Bot abc', tokenKind: 'bot', buildHash: 'deadbeef', now: NOW });
     expect(headers.has('x-super-properties')).toBe(false);

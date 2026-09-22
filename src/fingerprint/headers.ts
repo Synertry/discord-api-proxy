@@ -29,18 +29,18 @@ import type { ClientVersions, ClientVersionRecords } from './versions';
 import type { StaticTokenKind } from '../rotator/types';
 
 /** Inbound headers a caller is allowed to have forwarded verbatim; everything else is dropped. */
-export const FORWARDED_REQUEST_HEADERS: Readonly<Record<string, true>> = {
-  'content-type': true,
-  'content-length': true,
-  'x-audit-log-reason': true,
-  'x-context-properties': true,
-  'x-captcha-key': true,
-  'x-captcha-session-id': true,
-  'x-captcha-rqtoken': true,
-  'if-none-match': true,
-  'if-modified-since': true,
-  range: true,
-};
+export const FORWARDED_REQUEST_HEADERS: ReadonlySet<string> = new Set([
+  'content-type',
+  'content-length',
+  'x-audit-log-reason',
+  'x-context-properties',
+  'x-captcha-key',
+  'x-captcha-session-id',
+  'x-captcha-rqtoken',
+  'if-none-match',
+  'if-modified-since',
+  'range',
+]);
 
 export interface RequestIdentity {
   key: string;
@@ -73,7 +73,7 @@ export async function composeRequestHeaders(args: ComposeRequestHeadersArgs): Pr
 
   if (args.inbound) {
     for (const [name, value] of args.inbound.entries()) {
-      if (FORWARDED_REQUEST_HEADERS[name.toLowerCase()]) {
+      if (FORWARDED_REQUEST_HEADERS.has(name.toLowerCase())) {
         headers.set(name, value);
       }
     }
