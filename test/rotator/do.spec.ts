@@ -14,7 +14,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
-import { STATIC_GUARD_PREFIX, PENDING_LEASE_CAP } from '../../src/rotator/do';
+import { STATIC_GUARD_PREFIX, PENDING_LEASE_CAP, TOKEN_KEY_PREFIX } from '../../src/rotator/do';
 import type { TokenPoolDO } from '../../src/rotator/do';
 import type { ReleaseInput } from '../../src/rotator/types';
 
@@ -27,6 +27,36 @@ let counter = 0;
 function freshStub() {
   const id = env.TOKEN_POOL.idFromName(`test-${Date.now()}-${counter++}`);
   return env.TOKEN_POOL.get(id) as DurableObjectStub<TokenPoolDO>;
+}
+
+/**
+ * Backdate a registered token's `lastDispatchAt` to 0 so the next `acquire`
+ * is never blocked by `MIN_DISPATCH_GAP_MS` - for tests that loop
+ * acquire/release cycles on the SAME token to exercise unrelated behavior
+ * (401 counting, guild ineligibility, no-eligible-token classification),
+ * not the dispatch-gap floor itself (which has its own dedicated tests).
+ */
+async function clearDispatchGap(stub: DurableObjectStub<TokenPoolDO>, label: string): Promise<void> {
+  await runInDurableObject(stub, async (_instance, state) => {
+    const key = `${TOKEN_KEY_PREFIX}${label}`;
+    const token = await state.storage.get<{ lastDispatchAt: number }>(key);
+    if (token) {
+      token.lastDispatchAt = 0;
+      await state.storage.put(key, token);
+    }
+  });
+}
+
+/** Same as `clearDispatchGap`, for a static-guard identity keyed by hash rather than a pool token keyed by label. */
+async function clearStaticDispatchGap(stub: DurableObjectStub<TokenPoolDO>, identityHash: string): Promise<void> {
+  await runInDurableObject(stub, async (_instance, state) => {
+    const key = `${STATIC_GUARD_PREFIX}${identityHash}`;
+    const guard = await state.storage.get<{ lastDispatchAt: number }>(key);
+    if (guard) {
+      guard.lastDispatchAt = 0;
+      await state.storage.put(key, guard);
+    }
+  });
 }
 
 describe('TokenPoolDO.register / list / countSlot', () => {
@@ -171,6 +201,7 @@ describe('TokenPoolDO.acquireByLabel', () => {
     for (let i = 0; i < 3; i++) {
       const acq = await stub.acquire('default', ROUTE);
       if (acq.ok) await stub.release(acq.label, acq.requestId, { status: 401, routeKey: ROUTE });
+      await clearDispatchGap(stub, 'bad');
     }
     const result = await stub.acquireByLabel('bad', 'default', ROUTE);
     expect(result.ok).toBe(false);
@@ -250,6 +281,7 @@ describe('TokenPoolDO.release', () => {
       expect(acq.ok).toBe(true);
       if (!acq.ok) return;
       await stub.release(acq.label, acq.requestId, { status: 401, routeKey: ROUTE });
+      await clearDispatchGap(stub, 'tok');
     }
     const list = await stub.list();
     expect(list[0].status).toBe('invalid');
@@ -262,9 +294,11 @@ describe('TokenPoolDO.release', () => {
 
     let acq = await stub.acquire('default', ROUTE);
     if (acq.ok) await stub.release(acq.label, acq.requestId, { status: 401, routeKey: ROUTE });
+    await clearDispatchGap(stub, 'tok');
 
     acq = await stub.acquire('default', ROUTE);
     if (acq.ok) await stub.release(acq.label, acq.requestId, { status: 401, routeKey: ROUTE });
+    await clearDispatchGap(stub, 'tok');
 
     acq = await stub.acquire('default', ROUTE);
     if (acq.ok) await stub.release(acq.label, acq.requestId, { status: 200, routeKey: ROUTE });
@@ -323,6 +357,7 @@ describe('TokenPoolDO.release', () => {
     if (!next.ok) expect(next.reason).toBe('cooldown');
 
     // But the same token is fine for a different guild
+    await clearDispatchGap(stub, 'tok');
     const otherGuild = await stub.acquire('default', ROUTE, '111111111111111111');
     expect(otherGuild.ok).toBe(true);
   });
@@ -398,7 +433,7 @@ describe('TokenPoolDO fingerprint integration', () => {
     expect(mapping.userDefault?.profileId).toBe('chrome-win-de');
     expect(mapping.userPremium?.profileId).toBe('chrome-mac-en');
 
-    const prepared = await stub.prepareStatic('user-default');
+    const prepared = await stub.prepareStatic('irrelevant-hash-for-this-test', 'user-default');
     expect(prepared.fingerprint?.profileId).toBe('chrome-win-de');
   });
 
@@ -555,7 +590,16 @@ describe('TokenPoolDO static-identity guard: prepareStatic / leaseStatic / settl
       retryAfterMs: 9999,
     });
 
-    // The mismatched settle must not have applied its 429 to the real lease's identity.
+    // The mismatched settle must not have applied its 429, nor consumed the
+    // original lease - prove it by settling with the CORRECT routeKey now:
+    // this must still find and remove the SAME original lease (a lease a
+    // malformed settle had already silently consumed would make this a
+    // no-op too, and the bogus 429/9999ms retryAfter would still show up).
+    await stub.settleStatic(HASH_A, lease.requestId, { status: 200, routeKey: ROUTE });
+
+    // With the lease genuinely settled clean and no fallout from the bogus
+    // 429, a fresh lease (past the dispatch-gap floor) succeeds.
+    await clearStaticDispatchGap(stub, HASH_A);
     const second = await stub.leaseStatic(HASH_A, ROUTE);
     expect(second.ok).toBe(true);
   });
@@ -565,7 +609,7 @@ describe('TokenPoolDO static-identity guard: prepareStatic / leaseStatic / settl
     const lease = await stub.leaseStatic(HASH_A, ROUTE);
     if (!lease.ok) throw new Error('expected ok lease');
     await stub.settleStatic(HASH_A, lease.requestId, { status: 429, routeKey: ROUTE, retryAfterMs: 1000 });
-    // Second call with the same requestId: already removed from pendingLeases, so this is a no-op.
+    // Second call with the same requestId: already removed from leases, so this is a no-op.
     await expect(
       stub.settleStatic(HASH_A, lease.requestId, { status: 429, routeKey: ROUTE, retryAfterMs: 99999 }),
     ).resolves.toBeUndefined();
@@ -613,7 +657,7 @@ describe('TokenPoolDO static-identity guard: prepareStatic / leaseStatic / settl
         routeToBucket: {},
         globalCooldownUntil: 0,
         circuit: null,
-        pendingLeases: seededLeases,
+        leases: seededLeases,
       });
     });
 
@@ -653,34 +697,35 @@ describe('TokenPoolDO static-identity guard: prepareStatic / leaseStatic / settl
     const results = await Promise.all(Array.from({ length: 5 }, (_, i) => stub.leaseStatic(`${i}`.repeat(64), ROUTE)));
     // Each call uses a distinct identityHash against the same DO instance, so
     // none contend with each other on lastDispatchAt, bucket state, or
-    // pendingLeases - proving the guard is genuinely keyed per-hash rather
-    // than accidentally shared DO-wide (only the upstream circuit is DO-wide).
+    // leases - proving the guard is genuinely keyed per-hash rather than
+    // accidentally shared DO-wide (only the upstream circuit is DO-wide).
     expect(results.every((r) => r.ok)).toBe(true);
   });
 
-  it('concurrent leaseStatic + settleStatic pairs never leave a stale pending lease behind', async () => {
+  it('settling one lease and rejecting several more never leaves a stale entry behind', async () => {
+    // Deterministic by construction (sequential awaits, no real-concurrency
+    // timing race needed): true concurrent-lease serialization is already
+    // covered by the "issued concurrently" tests above and below. This test's
+    // own unique claim - a rejected leaseStatic call never writes a ghost
+    // entry to `leases` - does not depend on wall-clock racing at all.
     const stub = freshStub();
-    const outcomes = await Promise.all(
-      Array.from({ length: 5 }, async (_, i) => {
-        const routeKey = `GET:/concurrent-${i}`;
-        const lease = await stub.leaseStatic(HASH_A, routeKey);
-        if (!lease.ok) return lease;
-        await stub.settleStatic(HASH_A, lease.requestId, { status: 200, routeKey });
-        return lease;
-      }),
-    );
-    // All 5 calls target the same identity, so MIN_DISPATCH_GAP_MS lets only
-    // one actually lease (the rest are blocked immediately and never reach
-    // pendingLeases); that one successful lease is settled inline above.
-    const succeeded = outcomes.filter((o) => o.ok);
-    expect(succeeded).toHaveLength(1);
+    const first = await stub.leaseStatic(HASH_A, 'GET:/concurrent-0');
+    if (!first.ok) throw new Error('expected first lease to succeed');
+    await stub.settleStatic(HASH_A, first.requestId, { status: 200, routeKey: 'GET:/concurrent-0' });
 
-    // Inspect the guard directly: the one real lease was settled, so nothing
-    // should remain pending - proves the settle removed it and none of the
-    // four gap-blocked attempts left a ghost entry behind.
+    // Immediately (no wait) attempt 4 more leases on the SAME identity - all
+    // must be blocked by MIN_DISPATCH_GAP_MS.
+    for (let i = 1; i < 5; i++) {
+      const attempt = await stub.leaseStatic(HASH_A, `GET:/concurrent-${i}`);
+      expect(attempt.ok).toBe(false);
+    }
+
+    // The settled lease was removed, and none of the 4 rejected attempts left
+    // a ghost entry behind - proves a rejected leaseStatic call never writes
+    // to `leases` at all.
     await runInDurableObject(stub, async (_instance, state) => {
-      const guard = await state.storage.get<{ pendingLeases: unknown[] }>(`${STATIC_GUARD_PREFIX}${HASH_A}`);
-      expect(guard?.pendingLeases).toEqual([]);
+      const guard = await state.storage.get<{ leases: unknown[] }>(`${STATIC_GUARD_PREFIX}${HASH_A}`);
+      expect(guard?.leases).toEqual([]);
     });
   });
 });
@@ -716,12 +761,15 @@ describe('TokenPoolDO.reset and health', () => {
     await stub.register({ label: 'b', slot: 'default', tokenSecret: VALID_TOKEN_2 });
     await stub.register({ label: 'p', slot: 'premium', tokenSecret: VALID_TOKEN });
 
-    // Force `b` to invalid via direct in-instance release calls, bypassing
-    // the LRU selection that would otherwise hit `a` half the time.
+    // Force `b` to invalid via real acquire-then-release cycles (a fabricated
+    // requestId is correctly rejected now that release() is lease-gated -
+    // see the "release requestId/routeKey mismatch" defense). acquireByLabel
+    // pins to `b` specifically so the LRU auto-selection never hits `a`.
     for (let i = 0; i < 3; i++) {
-      await runInDurableObject(stub, async (instance) => {
-        await instance.release('b', `req-${i}`, { status: 401, routeKey: ROUTE });
-      });
+      const acq = await stub.acquireByLabel('b', 'default', ROUTE);
+      if (!acq.ok) throw new Error(`expected ok acquire on iteration ${i}`);
+      await stub.release(acq.label, acq.requestId, { status: 401, routeKey: ROUTE });
+      await clearDispatchGap(stub, 'b');
     }
 
     const health = await stub.health();

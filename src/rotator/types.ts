@@ -33,6 +33,7 @@
 
 import type { CustomProfile, ResolvedProfile } from '../fingerprint/profiles';
 import type { ClientVersionRecords, ClientVersions } from '../fingerprint/versions';
+export type { ClientVersionRecords, ClientVersions } from '../fingerprint/versions';
 
 /** Two strictly isolated pools. Default consumers never see premium tokens; vice versa. */
 export type Slot = 'default' | 'premium';
@@ -106,9 +107,9 @@ export interface IneligibleGuild {
 /**
  * The rate-limit budget shared by pool tokens and static identities: per-
  * Discord-bucket cooldown state, a whole-identity global cooldown (429
- * bench), an abuse-signal circuit, and the identity-wide dispatch-gap floor.
- * `evaluateBudget` / `applyOutcome` in `budget.ts` operate purely on this
- * shape.
+ * bench), an abuse-signal circuit, the identity-wide dispatch-gap floor, and
+ * outstanding leases. `evaluateBudget` / `applyOutcome` in `budget.ts`
+ * operate purely on this shape.
  */
 export interface BucketBudget {
   bucketStates: Record<DiscordBucketHash, BucketState>;
@@ -121,15 +122,39 @@ export interface BucketBudget {
    * Epoch ms of the last dispatched request for this identity, set at
    * lease/acquire time (not settle time - the gap is about dispatch
    * timing). `evaluateBudget` enforces `MIN_DISPATCH_GAP_MS` from this
-   * value regardless of route or per-bucket `remaining` count: two
-   * concurrent leases for the same identity can both see a bucket with
-   * `remaining > 0` before either has actually dispatched, so the bucket
-   * check alone cannot prevent two REST calls to the same identity under
-   * 1s apart. This floor is identity-wide, not per-route, so e.g. a
-   * typing-indicator dispatch and the message-send dispatch that follows
-   * it are paced against each other too.
+   * value regardless of route or per-bucket `remaining` count. This floor
+   * is identity-wide, not per-route, so e.g. a typing-indicator dispatch
+   * and the message-send dispatch that follows it are paced against each
+   * other too.
    */
   lastDispatchAt: number;
+  /**
+   * Outstanding leases (issued by `acquire`/`acquireByLabel`/`leaseStatic`)
+   * not yet settled. Two purposes:
+   *  1. `evaluateBudget` counts leases against `bucketStates[bucket].remaining`
+   *     so concurrent in-flight dispatches on the same bucket are accounted
+   *     for even before any of their responses has come back to decrement
+   *     `remaining` via header - `MIN_DISPATCH_GAP_MS` alone is NOT
+   *     sufficient here: a slow-to-respond dispatch can leave a second,
+   *     later dispatch (well past the 1s floor) seeing a stale
+   *     `remaining > 0` and wrongly proceeding.
+   *  2. `applyOutcome` applies an outcome only when its `requestId` matches
+   *     a still-outstanding lease AND that lease's `routeKey` matches the
+   *     outcome's - this rejects an unknown/already-settled requestId and a
+   *     malformed/mismatched settle alike, regardless of settle order. A
+   *     single last-requestId field (as `TokenState.lastReleaseRequestId`
+   *     uses, kept separately for pool tokens) only catches a duplicate of
+   *     the *most recent* release; concurrent leases can settle out of
+   *     order, so a full tracking list is needed here too.
+   *
+   * Entries past `LEASE_TTL_MS` (see `budget.ts`) are pruned lazily by
+   * `pruneLeases` - the request that issued them evidently crashed or hung
+   * before settling. The static guard additionally rejects a new lease at
+   * `PENDING_LEASE_CAP` (see `do.ts`) rather than evicting a still-
+   * outstanding one, so a genuinely in-flight request's eventual settle is
+   * never silently lost.
+   */
+  leases: Lease[];
 }
 
 /**
@@ -169,10 +194,12 @@ export interface TokenState extends BucketBudget {
   fingerprintProfileId?: string;
 }
 
-/** One outstanding `leaseStatic` reservation, awaiting `settleStatic`. */
-export interface PendingStaticLease {
+/** One outstanding dispatch reservation (from `acquire`/`acquireByLabel`/`leaseStatic`), awaiting its outcome via `release`/`settleStatic`. See `BucketBudget.leases`'s doc for why. */
+export interface Lease {
   requestId: string;
   routeKey: RouteKey;
+  /** Resolved via `routeToBucket[routeKey]` at grant time; absent when the route's bucket has never been learned yet. */
+  bucket?: DiscordBucketHash;
   leasedAt: number;
 }
 
@@ -186,24 +213,6 @@ export interface PendingStaticLease {
 export interface StaticIdentityState extends BucketBudget {
   identityHash: string;
   lastSeenAt: number;
-  /**
-   * Leases issued by `leaseStatic` and not yet settled. `settleStatic`
-   * applies an outcome only when its requestId is present here (and its
-   * `routeKey` matches the leased one), then removes the entry - this
-   * rejects an unknown requestId and a replayed duplicate of an
-   * already-settled one alike, regardless of settle order. A single
-   * last-requestId field (as `TokenState.lastReleaseRequestId` uses) only
-   * catches a duplicate of the *most recent* settle; concurrent leases can
-   * settle out of order, so a full tracking list is needed here.
-   *
-   * Entries past `STALE_LEASE_TTL_MS` (see `do.ts`) are pruned lazily on
-   * the next `leaseStatic`/`settleStatic` call for this identity - the
-   * request that issued them evidently crashed or hung before settling.
-   * At `PENDING_LEASE_CAP`, `leaseStatic` rejects a new lease rather than
-   * evicting a still-outstanding one, so a genuinely in-flight request's
-   * eventual settle is never silently lost.
-   */
-  pendingLeases: PendingStaticLease[];
 }
 
 /** Reason an acquire failed when no eligible token is available. */

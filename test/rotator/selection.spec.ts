@@ -25,6 +25,7 @@ function makeToken(label: string, overrides: Partial<TokenState> = {}): TokenSta
     globalCooldownUntil: 0,
     circuit: null,
     lastDispatchAt: 0,
+    leases: [],
     bucketStates: {},
     routeToBucket: {},
     ineligibleGuilds: [],

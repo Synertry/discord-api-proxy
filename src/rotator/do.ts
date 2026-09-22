@@ -27,7 +27,7 @@
  */
 
 import { DurableObject } from 'cloudflare:workers';
-import { applyOutcome, evaluateBudget, markDispatched, openUpstreamCircuit } from './budget';
+import { applyOutcome, evaluateBudget, grantLease, openUpstreamCircuit, pruneLeases } from './budget';
 import { chooseToken, evaluateTokenEligibility } from './selection';
 import { pruneIneligibleGuilds } from './validators';
 import { lookupProfile, listProfileIds } from '../fingerprint/profiles';
@@ -43,7 +43,6 @@ import type {
   IdentityCircuit,
   IneligibleGuild,
   LeaseStaticResult,
-  PendingStaticLease,
   PoolHealth,
   RegisterInput,
   ReleaseInput,
@@ -66,18 +65,10 @@ export const META_UPSTREAM_CIRCUIT_KEY = 'meta:upstream-circuit';
 const INELIGIBLE_GUILD_TTL_MS = 60 * 60 * 1000; // 1 hour
 /** Max concurrent outstanding leases per static identity. Generous: the budget/circuit backpressure keeps real concurrency low; this cap exists to bound storage, not to be a normal operating limit. */
 export const PENDING_LEASE_CAP = 50;
-/**
- * A pending lease older than this is treated as abandoned (its request
- * crashed or hung before calling `settleStatic`) and pruned lazily. Set
- * comfortably above the outbound fetch's own `AbortSignal.timeout(60_000)`
- * (see `proxy.ts`) so a legitimately slow-but-live request is never pruned
- * out from under its own eventual settle.
- */
-const STALE_LEASE_TTL_MS = 120_000;
 
 /** An empty budget for a newly-seen identity (pool or static). */
 function emptyBudget(): BucketBudget {
-  return { bucketStates: {}, routeToBucket: {}, globalCooldownUntil: 0, circuit: null, lastDispatchAt: 0 };
+  return { bucketStates: {}, routeToBucket: {}, globalCooldownUntil: 0, circuit: null, lastDispatchAt: 0, leases: [] };
 }
 
 /**
@@ -140,22 +131,18 @@ function hydrateBudget<T extends Partial<BucketBudget>>(raw: T): T & BucketBudge
     globalCooldownUntil: raw.globalCooldownUntil ?? 0,
     circuit: raw.circuit ?? null,
     lastDispatchAt: raw.lastDispatchAt ?? 0,
+    leases: raw.leases ?? [],
   };
 }
 
 /** A fresh, empty guard for a static identity never seen before. */
 function freshStaticGuard(identityHash: string, now: number): StaticIdentityState {
-  return { identityHash, lastSeenAt: now, pendingLeases: [], ...emptyBudget() };
+  return { identityHash, lastSeenAt: now, ...emptyBudget() };
 }
 
-/** Hydrate a static-guard record read from storage, tolerating a record written before `pendingLeases` existed. */
+/** Hydrate a static-guard record read from storage, tolerating a record written before a field existed. */
 function hydrateStaticGuard(raw: StaticIdentityState, identityHash: string): StaticIdentityState {
-  return { ...hydrateBudget(raw), identityHash, pendingLeases: raw.pendingLeases ?? [] };
-}
-
-/** Drop leases older than `STALE_LEASE_TTL_MS`: their request evidently crashed or hung before settling. */
-function prunePendingLeases(leases: readonly PendingStaticLease[], now: number): PendingStaticLease[] {
-  return leases.filter((l) => now - l.leasedAt < STALE_LEASE_TTL_MS);
+  return { ...hydrateBudget(raw), identityHash };
 }
 
 /**
@@ -171,14 +158,16 @@ export class TokenPoolDO extends DurableObject<Bindings> {
    */
   async acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult> {
     const now = Date.now();
-    const [tokens, upstreamCircuit] = await Promise.all([this.loadAllTokens(), this.getUpstreamCircuit()]);
+    const [rawTokens, upstreamCircuit] = await Promise.all([this.loadAllTokens(), this.getUpstreamCircuit()]);
+    const tokens = rawTokens.map((raw) => pruneLeases(raw, now));
 
     const result = chooseToken(tokens, slot, routeKey, now, guildId, upstreamCircuit);
     if (!result.chosen) {
       return result.unavailable!;
     }
 
-    const t = markDispatched(result.chosen, now);
+    const requestId = crypto.randomUUID();
+    const t = grantLease(result.chosen, routeKey, requestId, now);
     t.lastUsedAt = now;
     t.inFlightCount += 1;
 
@@ -193,7 +182,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
       ok: true,
       label: t.label,
       tokenSecret: t.tokenSecret,
-      requestId: crypto.randomUUID(),
+      requestId,
       fingerprintProfileId: t.fingerprintProfileId,
     };
   }
@@ -218,7 +207,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
     if (!raw) {
       return { ok: false, reason: 'no-eligible-token', retryAfter: 60_000 };
     }
-    const hydrated = hydrateBudget(raw);
+    const hydrated = pruneLeases(hydrateBudget(raw), now);
 
     const verdict = evaluateTokenEligibility(hydrated, slot, routeKey, now, guildId, upstreamCircuit);
     if (!verdict.ok) {
@@ -228,7 +217,8 @@ export class TokenPoolDO extends DurableObject<Bindings> {
       return { ok: false, reason: 'no-eligible-token', retryAfter: 60_000 };
     }
 
-    const t = markDispatched(hydrated, now);
+    const requestId = crypto.randomUUID();
+    const t = grantLease(hydrated, routeKey, requestId, now);
     t.lastUsedAt = now;
     t.inFlightCount += 1;
 
@@ -242,7 +232,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
       ok: true,
       label: t.label,
       tokenSecret: t.tokenSecret,
-      requestId: crypto.randomUUID(),
+      requestId,
       fingerprintProfileId: t.fingerprintProfileId,
     };
   }
@@ -259,11 +249,28 @@ export class TokenPoolDO extends DurableObject<Bindings> {
     const now = Date.now();
     const raw = await this.ctx.storage.get<TokenState>(`${TOKEN_KEY_PREFIX}${label}`);
     if (!raw) return; // Token deleted before release; drop silently.
-    const t = hydrateBudget(raw);
+    const t = pruneLeases(hydrateBudget(raw), now);
 
     // Stale-write guard: duplicate or out-of-order
     if (t.lastReleaseRequestId === requestId) return;
     if (t.lastReleaseAt > now) return;
+
+    // Lease-gated: ONLY a still-outstanding lease with this exact requestId
+    // AND matching routeKey authorizes ANY mutation below - checked before
+    // touching inFlightCount, the 401 counter, or any budget/circuit state,
+    // so an unknown, already-settled, pruned-as-abandoned, or routeKey-
+    // mismatched requestId is a complete no-op with zero storage writes and
+    // zero side effects (including never reaching `applyUpstreamCircuit`,
+    // which is DO-wide - a bogus release must never be able to trip it).
+    const lease = t.leases.find((l) => l.requestId === requestId);
+    if (!lease || lease.routeKey !== outcome.routeKey) {
+      console.error('IDENTITY_GUARD release requestId/routeKey mismatch or unknown, dropping', {
+        identity: `pool:${label}`,
+        requestId,
+        routeKey: outcome.routeKey,
+      });
+      return;
+    }
 
     t.inFlightCount = Math.max(0, t.inFlightCount - 1);
     t.lastReleaseRequestId = requestId;
@@ -278,11 +285,12 @@ export class TokenPoolDO extends DurableObject<Bindings> {
     }
 
     const budgetBefore = t.circuit;
-    const budgetAfter = applyOutcome(t, outcome, now);
+    const budgetAfter = applyOutcome(t, requestId, outcome, now);
     t.bucketStates = budgetAfter.bucketStates;
     t.routeToBucket = budgetAfter.routeToBucket;
     t.globalCooldownUntil = budgetAfter.globalCooldownUntil;
     t.circuit = budgetAfter.circuit;
+    t.leases = budgetAfter.leases;
     if (!budgetBefore && t.circuit) {
       console.error('IDENTITY_GUARD circuit opened', { identity: `pool:${label}`, signal: t.circuit.signal, until: t.circuit.until });
     }
@@ -347,70 +355,66 @@ export class TokenPoolDO extends DurableObject<Bindings> {
    * before dispatching it. `identityHash` (see `token-hash.ts`) is the ONLY
    * identity-scoping argument, never `kind` - not even for logging, which
    * uses a truncated hash instead so it never doubles as a second, kind-keyed
-   * identity label in the logs. On success, records the issued lease in
-   * `pendingLeases` so `settleStatic` can validate against it; rejects with
-   * `reason: 'capacity'` at `PENDING_LEASE_CAP` rather than evicting a still-
-   * outstanding lease.
+   * identity label in the logs. On success, records the issued lease so
+   * `settleStatic` can validate against it; rejects with `reason: 'capacity'`
+   * at `PENDING_LEASE_CAP` rather than evicting a still-outstanding lease.
    */
   async leaseStatic(identityHash: string, routeKey: RouteKey): Promise<LeaseStaticResult> {
     const now = Date.now();
     const guardKey = `${STATIC_GUARD_PREFIX}${identityHash}`;
     const [raw, upstreamCircuit] = await Promise.all([this.ctx.storage.get<StaticIdentityState>(guardKey), this.getUpstreamCircuit()]);
-    const guard: StaticIdentityState = raw ? hydrateStaticGuard(raw, identityHash) : freshStaticGuard(identityHash, now);
-    guard.pendingLeases = prunePendingLeases(guard.pendingLeases, now);
+    const hydrated: StaticIdentityState = raw ? hydrateStaticGuard(raw, identityHash) : freshStaticGuard(identityHash, now);
+    const guard = pruneLeases(hydrated, now);
 
     const eligibility = evaluateBudget(guard, routeKey, now, upstreamCircuit);
     if (!eligibility.ok) {
       return { ok: false, block: { reason: 'cooldown', retryAfter: eligibility.retryAfter, signal: eligibility.signal } };
     }
-    if (guard.pendingLeases.length >= PENDING_LEASE_CAP) {
+    if (guard.leases.length >= PENDING_LEASE_CAP) {
       console.error('IDENTITY_GUARD pending-lease cap reached', { identity: `static:${identityHash.slice(0, 8)}`, cap: PENDING_LEASE_CAP });
       return { ok: false, block: { reason: 'capacity', retryAfter: 1000 } };
     }
 
-    guard.lastDispatchAt = now;
-    guard.lastSeenAt = now;
     const requestId = crypto.randomUUID();
-    guard.pendingLeases.push({ requestId, routeKey, leasedAt: now });
-    await this.ctx.storage.put(guardKey, guard);
+    const leased = grantLease(guard, routeKey, requestId, now);
+    leased.lastSeenAt = now;
+    await this.ctx.storage.put(guardKey, leased);
 
     return { ok: true, requestId };
   }
 
   /**
-   * Settle a lease immediately after its fetch completes. Applies the
-   * outcome via `applyOutcome` (identity-scoped: bucket, global cooldown,
-   * captcha circuit) plus `openUpstreamCircuit` on a Cloudflare signal
-   * (DO-wide). A no-op when `requestId` is not a currently-pending lease
-   * for this identity - an unknown id, a replayed duplicate of an
-   * already-settled lease, or one pruned as abandoned all land here safely.
+   * Settle a lease immediately after its fetch completes. Lease-gated: ONLY
+   * a still-outstanding lease with this exact `requestId` AND matching
+   * `routeKey` authorizes ANY mutation - checked before touching
+   * `bucketStates`/`circuit`/the DO-wide upstream circuit, so an unknown,
+   * already-settled, pruned-as-abandoned, or routeKey-mismatched requestId
+   * is a complete no-op with zero storage writes and zero side effects.
    */
   async settleStatic(identityHash: string, requestId: string, outcome: ReleaseInput): Promise<void> {
     const now = Date.now();
     const guardKey = `${STATIC_GUARD_PREFIX}${identityHash}`;
     const raw = await this.ctx.storage.get<StaticIdentityState>(guardKey);
     if (!raw) return;
-    const guard = hydrateStaticGuard(raw, identityHash);
-    guard.pendingLeases = prunePendingLeases(guard.pendingLeases, now);
+    const guard = pruneLeases(hydrateStaticGuard(raw, identityHash), now);
 
-    const lease = guard.pendingLeases.find((l) => l.requestId === requestId);
-    if (!lease) return; // Unknown, already-settled, or pruned-as-abandoned - drop silently, matching `release`'s stale-write guard.
-    if (lease.routeKey !== outcome.routeKey) {
-      console.error('IDENTITY_GUARD settle routeKey mismatch, dropping', {
+    const lease = guard.leases.find((l) => l.requestId === requestId);
+    if (!lease || lease.routeKey !== outcome.routeKey) {
+      console.error('IDENTITY_GUARD settle requestId/routeKey mismatch or unknown, dropping', {
         identity: `static:${identityHash.slice(0, 8)}`,
-        leasedRoute: lease.routeKey,
-        outcomeRoute: outcome.routeKey,
+        requestId,
+        routeKey: outcome.routeKey,
       });
       return;
     }
-    guard.pendingLeases = guard.pendingLeases.filter((l) => l.requestId !== requestId);
 
     const before = guard.circuit;
-    const after = applyOutcome(guard, outcome, now);
+    const after = applyOutcome(guard, requestId, outcome, now);
     guard.bucketStates = after.bucketStates;
     guard.routeToBucket = after.routeToBucket;
     guard.globalCooldownUntil = after.globalCooldownUntil;
     guard.circuit = after.circuit;
+    guard.leases = after.leases;
     guard.lastSeenAt = now;
     if (!before && guard.circuit) {
       console.error('IDENTITY_GUARD circuit opened', {

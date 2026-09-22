@@ -19,7 +19,7 @@
  * circuit (captcha - specific to that identity/account).
  */
 
-import type { BucketBudget, RouteKey, ReleaseInput, IdentityCircuit, AbuseSignal } from './types';
+import type { BucketBudget, RouteKey, ReleaseInput, IdentityCircuit, AbuseSignal, Lease } from './types';
 
 /** How long a captcha challenge blocks the specific identity that triggered it. */
 export const CAPTCHA_CIRCUIT_MS = 30 * 60 * 1000;
@@ -45,18 +45,26 @@ export const BUCKET_STATES_CAP = 200;
  */
 export const MIN_DISPATCH_GAP_MS = 1000;
 
+/** A lease older than this is treated as abandoned (its request crashed or hung before settling) and pruned lazily by `pruneLeases`. Comfortably above the outbound fetch's own `AbortSignal.timeout(60_000)` (see `proxy.ts`) so a legitimately slow-but-live request is never pruned out from under its own eventual settle. */
+export const LEASE_TTL_MS = 90_000;
+
+/** Cooldown reported when a route's bucket is unknown or its reset window has elapsed and a lease is already in flight for it: probe one request at a time until a fresh response re-teaches the bucket, rather than letting an unbounded number of concurrent requests through blind. */
+export const UNKNOWN_BUCKET_RETRY_MS = 1000;
+
 export type BudgetEligibility = { ok: true } | { ok: false; reason: 'cooldown'; retryAfter: number; signal?: AbuseSignal };
 
 /**
  * Evaluate whether an identity (pool token or static identity) can dispatch
  * a request on `routeKey` right now. Collects every active constraint (the
  * DO-wide upstream circuit, the identity's own circuit, its global cooldown,
- * the identity-wide dispatch-gap floor, the specific bucket's cooldown) and
- * reports the *soonest* one clearing, matching the pre-existing pool
- * behavior of picking the soonest of several simultaneous constraints
- * (global cooldown, bucket, guild-ineligibility) rather than the latest -
- * `retryAfter` is a "worth rechecking around here" hint, not a guarantee the
- * identity is unblocked by every constraint at that instant.
+ * the identity-wide dispatch-gap floor, and per-bucket in-flight-adjusted
+ * remaining) and reports the soonest one to clear once no circuit is open -
+ * `retryAfter` is a hint worth rechecking around, never a guarantee every
+ * constraint has cleared by then.
+ *
+ * Call `pruneLeases` before this so `budget.leases` reflects only genuinely
+ * outstanding dispatches - `evaluateBudget` itself never prunes (it is pure
+ * and read-only, no timestamp-dependent side channel).
  */
 export function evaluateBudget(
   budget: BucketBudget,
@@ -64,31 +72,78 @@ export function evaluateBudget(
   now: number,
   upstreamCircuit?: IdentityCircuit | null,
 ): BudgetEligibility {
-  const candidates: { at: number; signal?: AbuseSignal }[] = [];
-
+  // Circuits are a hard gate, not a quota timer: an open circuit blocks
+  // dispatch for its FULL remaining duration regardless of whether some
+  // other quota candidate (the dispatch-gap floor, a per-bucket reset)
+  // happens to clear sooner - reporting the sooner one would both lie about
+  // when a retry can actually succeed (the circuit is still open) and drop
+  // the `signal` the caller needs to know WHY (captcha vs cloudflare) it is
+  // blocked. Checked first, and returned immediately when open - never
+  // pooled into the soonest-of-everything reduction below.
   if (upstreamCircuit && upstreamCircuit.until > now) {
-    candidates.push({ at: upstreamCircuit.until, signal: upstreamCircuit.signal });
+    return { ok: false, reason: 'cooldown', retryAfter: upstreamCircuit.until - now, signal: upstreamCircuit.signal };
   }
   if (budget.circuit && budget.circuit.until > now) {
-    candidates.push({ at: budget.circuit.until, signal: budget.circuit.signal });
+    return { ok: false, reason: 'cooldown', retryAfter: budget.circuit.until - now, signal: budget.circuit.signal };
   }
+
+  // Quota-style candidates ARE genuinely racing, independent windows (a
+  // pre-existing, deliberately tested contract: global=5s + bucket=2s +
+  // guild=3s reports 2s, the MIN, not even 3s) - `retryAfter` here is only
+  // ever "worth rechecking around", never a guarantee every constraint has
+  // cleared, so reporting the soonest one is correct once no circuit is open.
+  const candidates: { at: number }[] = [];
   if (budget.globalCooldownUntil > now) {
     candidates.push({ at: budget.globalCooldownUntil });
   }
   if (budget.lastDispatchAt > 0 && now - budget.lastDispatchAt < MIN_DISPATCH_GAP_MS) {
     candidates.push({ at: budget.lastDispatchAt + MIN_DISPATCH_GAP_MS });
   }
+
+  // In-flight-adjusted bucket accounting: `MIN_DISPATCH_GAP_MS` alone is
+  // NOT sufficient to prevent over-committing a low-`remaining` bucket - a
+  // slow-to-respond dispatch can leave a second, later dispatch (well past
+  // the 1s floor) seeing a stale `remaining > 0` before the first one's
+  // response has come back to decrement it via header. Counting `leases`
+  // still outstanding for this bucket closes that gap.
   const bucketHash = budget.routeToBucket[routeKey];
-  if (bucketHash) {
-    const bucket = budget.bucketStates[bucketHash];
-    if (bucket && bucket.remaining <= 0 && bucket.resetAt > now) {
-      candidates.push({ at: bucket.resetAt });
+  const inFlight = budget.leases.filter((l) => (bucketHash ? l.bucket === bucketHash : l.routeKey === routeKey)).length;
+  const bucketState = bucketHash ? budget.bucketStates[bucketHash] : undefined;
+  const bucketFresh = bucketState !== undefined && bucketState.resetAt > now;
+  if (bucketFresh) {
+    if (bucketState!.remaining - inFlight <= 0) {
+      candidates.push({ at: bucketState!.resetAt });
     }
+  } else if (inFlight >= 1) {
+    // Bucket never learned for this route, or its reset window already
+    // elapsed (stale remaining count) - probe one at a time until a fresh
+    // response re-teaches it, rather than letting unbounded concurrency
+    // through blind.
+    candidates.push({ at: now + UNKNOWN_BUCKET_RETRY_MS });
   }
 
   if (candidates.length === 0) return { ok: true };
   const soonest = candidates.reduce((a, b) => (a.at < b.at ? a : b));
-  return { ok: false, reason: 'cooldown', retryAfter: soonest.at - now, signal: soonest.signal };
+  return { ok: false, reason: 'cooldown', retryAfter: soonest.at - now };
+}
+
+/** Drop leases past `LEASE_TTL_MS`: their request evidently crashed or hung before settling. Pure. */
+export function pruneLeases<T extends BucketBudget>(budget: T, now: number): T {
+  const leases = budget.leases.filter((l) => now - l.leasedAt < LEASE_TTL_MS);
+  if (leases.length === budget.leases.length) return budget;
+  return { ...budget, leases };
+}
+
+/**
+ * Grant a lease for one dispatch: record it (with the bucket resolved from
+ * `routeToBucket`, if already known) and mark `lastDispatchAt` for the
+ * `MIN_DISPATCH_GAP_MS` floor. Pure. Called at acquire/acquireByLabel/
+ * leaseStatic time - the `requestId` is generated by the caller so it can
+ * be returned to the Worker for the matching settle.
+ */
+export function grantLease<T extends BucketBudget>(budget: T, routeKey: RouteKey, requestId: string, now: number): T {
+  const lease: Lease = { requestId, routeKey, bucket: budget.routeToBucket[routeKey], leasedAt: now };
+  return { ...budget, leases: [...budget.leases, lease], lastDispatchAt: now };
 }
 
 /**
@@ -97,13 +152,30 @@ export function evaluateBudget(
  * identity's own circuit. Pure: returns a new object, never mutates
  * `budget`.
  *
+ * `requestId` gates the whole thing: when non-null, the outcome is applied
+ * (and that lease removed from `leases`) ONLY if a still-outstanding lease
+ * with that exact `requestId` AND matching `routeKey` is found - an unknown
+ * id (already settled, replayed, or pruned-as-abandoned) and a malformed/
+ * mismatched settle (right id, wrong route) are both a complete no-op, the
+ * budget returned unchanged. Pass `null` only for pure/test-only evaluation
+ * that intentionally bypasses lease gating.
+ *
  * Deliberately does NOT act on `outcome.signal === 'cloudflare'`: a
  * Cloudflare/edge block is DO-wide (shared egress IP), not scoped to
  * whichever identity happened to trigger it. Callers must separately check
  * `outcome.signal === 'cloudflare'` and apply `openUpstreamCircuit` to the
  * DO's single `meta:upstream-circuit` record instead - see the module doc.
  */
-export function applyOutcome(budget: BucketBudget, outcome: ReleaseInput, now: number): BucketBudget {
+export function applyOutcome(budget: BucketBudget, requestId: string | null, outcome: ReleaseInput, now: number): BucketBudget {
+  let leases = budget.leases;
+  if (requestId !== null) {
+    const lease = leases.find((l) => l.requestId === requestId);
+    if (!lease || lease.routeKey !== outcome.routeKey) {
+      return budget;
+    }
+    leases = leases.filter((l) => l.requestId !== requestId);
+  }
+
   let globalCooldownUntil = budget.globalCooldownUntil;
   if (outcome.status === 429) {
     const retryAfterMs = outcome.retryAfterMs ?? 1000;
@@ -132,12 +204,7 @@ export function applyOutcome(budget: BucketBudget, outcome: ReleaseInput, now: n
     circuit = null;
   }
 
-  return { bucketStates, routeToBucket, globalCooldownUntil, circuit, lastDispatchAt: budget.lastDispatchAt };
-}
-
-/** Mark an identity as having just dispatched a request, for the `MIN_DISPATCH_GAP_MS` floor. Pure: returns a new object. Called at lease/acquire time, never at settle time - the gap is about dispatch timing, not completion timing. */
-export function markDispatched<T extends BucketBudget>(budget: T, now: number): T {
-  return { ...budget, lastDispatchAt: now };
+  return { bucketStates, routeToBucket, globalCooldownUntil, circuit, lastDispatchAt: budget.lastDispatchAt, leases };
 }
 
 /**

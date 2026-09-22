@@ -31,6 +31,7 @@ function makeTokenState(label: string, overrides: Partial<TokenState> = {}): Tok
     globalCooldownUntil: 0,
     circuit: null,
     lastDispatchAt: 0,
+    leases: [],
     bucketStates: {},
     routeToBucket: {},
     ineligibleGuilds: [],
