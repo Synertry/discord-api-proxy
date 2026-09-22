@@ -83,7 +83,7 @@ describe('tally', () => {
 
       // recipient2 (eve): 10 + 4 = 14 (STANDARD_HIGH_VOTES, MULTI_MENTION)
       // recipient1 (diana): 3 + 3 + 4 + 1 + 2 = 13 (STANDARD, STANDARD_2, MULTI_MENTION, NICKNAME, DIFFERENT_FORMAT)
-      // sender1 (alice): 5 (REPLY — alice is the author of the referenced message)
+      // sender1 (alice): 5 (REPLY - alice is the author of the referenced message)
       expect(topVotedReceiver[0]).toEqual({ userId: USERS.recipient2.id, username: 'eve', count: 14 });
       expect(topVotedReceiver[1]).toEqual({ userId: USERS.recipient1.id, username: 'diana', count: 13 });
       expect(topVotedReceiver[2]).toEqual({ userId: USERS.sender1.id, username: 'alice', count: 5 });

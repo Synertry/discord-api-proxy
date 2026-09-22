@@ -241,9 +241,9 @@ Tests use `@cloudflare/vitest-pool-workers` to run in a Workers-compatible runti
 
 Deployment is handled by a three-stage CI/CD pipeline:
 
-1. **Push to `main`** — [`ci.yaml`](.github/workflows/ci.yaml) runs linting and tests. Dependabot dependency bumps are auto-merged directly to `production`.
-2. **Pre-production review** — [`pre-production-review.yaml`](.github/workflows/pre-production-review.yaml) generates a change report and requests reviewer approval via the `status/approved` label.
-3. **Deploy** — [`deploy.yaml`](.github/workflows/deploy.yaml) triggers on push to `production`, uploading and promoting the Worker via Wrangler's gradual deployment (`wrangler versions upload` → `wrangler versions deploy`).
+1. **Push to `main`** - [`ci.yaml`](.github/workflows/ci.yaml) runs linting and tests. Dependabot dependency bumps are auto-merged directly to `production`.
+2. **Pre-production review** - [`pre-production-review.yaml`](.github/workflows/pre-production-review.yaml) generates a change report and requests reviewer approval via the `status/approved` label.
+3. **Deploy** - [`deploy.yaml`](.github/workflows/deploy.yaml) triggers on push to `production`, uploading and promoting the Worker via Wrangler's gradual deployment (`wrangler versions upload` → `wrangler versions deploy`).
 
 [`bootstrap-wrangler-migration.yaml`](.github/workflows/bootstrap-wrangler-migration.yaml) is a `workflow_dispatch`-only job that runs a non-versioned `wrangler deploy`. Cloudflare refuses `wrangler versions upload` when a Worker migration is part of the upload (e.g. introducing a new Durable Object class), so this workflow gets triggered manually from the Actions tab once per migration. Future versioned deploys via `deploy.yaml` resume working after.
 
@@ -253,9 +253,9 @@ Set these in your repository settings under **Settings → Secrets and variables
 
 | Secret | Where to get it |
 |--------|-----------------|
-| `CLOUDFLARE_API_TOKEN` | [Cloudflare Dashboard → My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) — create a token with the **Edit Cloudflare Workers** template |
+| `CLOUDFLARE_API_TOKEN` | [Cloudflare Dashboard → My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) - create a token with the **Edit Cloudflare Workers** template |
 | `CLOUDFLARE_ACCOUNT_ID` | [Cloudflare Dashboard](https://dash.cloudflare.com/) → select your account → copy the **Account ID** from the right sidebar on the overview page |
 | `CUSTOM_DOMAIN` | Your Cloudflare Workers custom domain (e.g. `api.example.com`). Injected into `wrangler.jsonc` at deploy time via the `__CUSTOM_DOMAIN__` placeholder |
-| `PAT` | [GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens](https://github.com/settings/tokens?type=beta) — needs **Contents: Read and write** and **Pull requests: Read and write** permissions for this repo. Required because pushes made with the default `GITHUB_TOKEN` do not trigger downstream workflows |
+| `PAT` | [GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens](https://github.com/settings/tokens?type=beta) - needs **Contents: Read and write** and **Pull requests: Read and write** permissions for this repo. Required because pushes made with the default `GITHUB_TOKEN` do not trigger downstream workflows |
 
 Set the runtime Wrangler secrets via `wrangler secret put <NAME>` once after the first deploy: `DISCORD_TOKEN_BOT`, `DISCORD_TOKEN_USER`, `AUTH_KEY`, plus optional `DISCORD_TOKEN_USER_PREMIUM` + `AUTH_KEY_PREMIUM` and `AUTH_KEY_ADMIN`.

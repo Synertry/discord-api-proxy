@@ -39,7 +39,7 @@
 		"nodejs_compat"
 	],
 	/**
-	 * Durable Objects — token pool rotator.
+	 * Durable Objects - token pool rotator.
 	 * The TokenPoolDO class is exported from `src/index.ts` and stores N user
 	 * tokens with per-Discord-bucket cooldowns. Cross-codebase consumers add a
 	 * binding with `"script_name": "discord-api-proxy"` to reach this DO.

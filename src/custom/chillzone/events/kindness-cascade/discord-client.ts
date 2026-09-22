@@ -57,7 +57,7 @@ export async function fetchAllMessages(channelId: string, token: string, fetchFn
   const allMessages: DiscordMessage[] = [];
   let cursor: string | undefined;
 
-  // Authorization header is identical for every page — construct once
+  // Authorization header is identical for every page - construct once
   const headers = new Headers({ Authorization: token });
 
   while (allMessages.length < MAX_MESSAGES) {

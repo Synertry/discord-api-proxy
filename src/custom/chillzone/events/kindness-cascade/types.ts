@@ -11,9 +11,9 @@
  * Domain and Discord API types for the Kindness Cascade tallying pipeline.
  *
  * Organized into three layers:
- * - **Discord API types** — Subset of Discord's message structure used for fetching
- * - **Domain types** — Internal classification and entity representations
- * - **API response types** — Structures returned by the tallying endpoint
+ * - **Discord API types** - Subset of Discord's message structure used for fetching
+ * - **Domain types** - Internal classification and entity representations
+ * - **API response types** - Structures returned by the tallying endpoint
  */
 
 // ---------------------------------------------------------------------------
@@ -48,7 +48,7 @@ export interface DiscordMessageReference {
  */
 export interface DiscordMessage {
   readonly id: string;
-  /** Discord message type — 0 = DEFAULT, 19 = REPLY. */
+  /** Discord message type - 0 = DEFAULT, 19 = REPLY. */
   readonly type: number;
   readonly content: string;
   readonly author: DiscordMessageAuthor;

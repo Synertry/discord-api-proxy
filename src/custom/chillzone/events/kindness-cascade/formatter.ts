@@ -114,7 +114,7 @@ export function formatDiscordMessage(
 
   sections.push(formatStats(result.stats));
 
-  // Ranked sections — always show top 3 regardless of how many the API returned.
+  // Ranked sections - always show top 3 regardless of how many the API returned.
   // Joined with double newlines (single blank line) to keep them visually grouped.
   const rankedSections = [
     `### Top Voted Kindness\n${formatSubmissionRanked(result.ranked.topVotedKindness.slice(0, TOP_RANKED))}`,
@@ -125,7 +125,7 @@ export function formatDiscordMessage(
   ].join('\n\n');
   sections.push(rankedSections);
 
-  // Listing sections — skip empty categories, exclude invalidSubmissions
+  // Listing sections - skip empty categories, exclude invalidSubmissions
   const listingSections = [
     formatListingSection('Reply Submissions', result.listings.replySubmissions, showAll),
     formatListingSection('Multi Mention Submissions', result.listings.multiMentionSubmissions, showAll),

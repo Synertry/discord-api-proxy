@@ -34,7 +34,7 @@ export type Bindings = {
 
 /**
  * Discord user object as returned by various Discord API endpoints.
- * Shape varies depending on the endpoint — guild member fetches nest the user
+ * Shape varies depending on the endpoint - guild member fetches nest the user
  * object and include guild-specific fields like `roles` and `nick`.
  */
 export interface DiscordUser {
@@ -43,9 +43,9 @@ export interface DiscordUser {
   /** Display name (may differ from username). */
   global_name?: string;
   avatar?: string;
-  /** Guild roles — only present when fetched via guild member endpoints. */
+  /** Guild roles - only present when fetched via guild member endpoints. */
   roles?: string[];
-  /** Nested user object — present in guild member fetch responses. */
+  /** Nested user object - present in guild member fetch responses. */
   user?: {
     id: string;
     username: string;

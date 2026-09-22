@@ -39,7 +39,7 @@ function getTotalReactionCount(reactions: readonly DiscordReaction[] | undefined
  *
  * @example
  * extractLeadingMentionIds('<@123> <@456> you rock!') // ['123', '456']
- * extractLeadingMentionIds('hey <@123>')              // [] — mention is not leading
+ * extractLeadingMentionIds('hey <@123>')              // [] - mention is not leading
  */
 function extractLeadingMentionIds(content: string): readonly string[] {
   const ids: string[] = [];

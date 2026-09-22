@@ -11,8 +11,8 @@
  * Hono route handlers for the Kindness Cascade tallying endpoint.
  *
  * Supports two response modes on `GET /kindness-cascade`:
- * - **JSON** (default) — OpenAPI-typed response with the full tallying result
- * - **Text** (`?formattedMessage=true`) — Discord-formatted `text/plain` message
+ * - **JSON** (default) - OpenAPI-typed response with the full tallying result
+ * - **Text** (`?formattedMessage=true`) - Discord-formatted `text/plain` message
  *
  * The text handler is registered **before** the OpenAPI handler so it takes priority
  * when the query param is present; otherwise it falls through via `next()` to the
@@ -94,7 +94,7 @@ function handleDiscordError(c: Context, err: DiscordApiError) {
 
 export const kindnessCascadeRoutes = new OpenAPIHono<Env>();
 
-// Formatted text handler — registered before OpenAPI route to take priority when matched.
+// Formatted text handler - registered before OpenAPI route to take priority when matched.
 // Falls through to the OpenAPI handler via next() when formattedMessage is not 'true'.
 kindnessCascadeRoutes.get('/kindness-cascade', async (c, next) => {
   if (c.req.query('formattedMessage') !== 'true') return next();
@@ -126,7 +126,7 @@ kindnessCascadeRoutes.get('/kindness-cascade', async (c, next) => {
   }
 });
 
-// OpenAPI handler — JSON response with automatic schema validation.
+// OpenAPI handler - JSON response with automatic schema validation.
 kindnessCascadeRoutes.openapi(kindnessCascadeRoute, async (c) => {
   const { guildId, channelId, all } = c.req.valid('query');
   const token = c.var.discordToken;
