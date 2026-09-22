@@ -44,12 +44,12 @@ export { TokenPoolDO } from './rotator/do';
  * Creates and configures the Hono application with all middleware and routes.
  *
  * The middleware sieve processes requests in this order:
- * 1. **Rate limit interceptor** — Post-processing: reformats 429 responses, preserves Discord rate-limit headers
- * 2. **Auth validation** — Rejects unauthenticated requests
- * 3. **Discord context** — Selects bot/user token and user-agent
- * 4. **Snowflake validation** — Validates Discord IDs in URL path segments
- * 5. **Custom routes** — Business logic endpoints (e.g. Kindness Cascade)
- * 6. **Proxy forwarder** — Catch-all that forwards to Discord API
+ * 1. **Rate limit interceptor** - Post-processing: reformats 429 responses, preserves Discord rate-limit headers
+ * 2. **Auth validation** - Rejects unauthenticated requests
+ * 3. **Discord context** - Selects bot/user token and user-agent
+ * 4. **Snowflake validation** - Validates Discord IDs in URL path segments
+ * 5. **Custom routes** - Business logic endpoints (e.g. Kindness Cascade)
+ * 6. **Proxy forwarder** - Catch-all that forwards to Discord API
  *
  * @param mockFetch - Optional fetch override for integration tests.
  * @param mockTokenPool - Optional in-memory TokenPoolClient for tests; bypasses the real DO.
@@ -135,7 +135,7 @@ export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolCli
   // Sieve Layer 6: Catch-All Proxy Forwarder (everything else → Discord API)
   app.route('/', proxyRoute);
 
-  /** Global error handler — logs full error internally, returns generic message to client. */
+  /** Global error handler - logs full error internally, returns generic message to client. */
   app.onError((err, c) => {
     console.error('HONO ERROR:', err);
     return c.json({ error: 'Internal Server Error' }, 500);

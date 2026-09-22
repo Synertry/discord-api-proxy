@@ -23,9 +23,9 @@ const snowflakeSchema = z.string().regex(/^\d{17,20}$/, 'Must be a valid Discord
 /**
  * Query parameters for the Kindness Cascade tallying endpoint.
  *
- * - `guildId` / `channelId` — Target Discord server and channel (required)
- * - `all` — When `'true'`, returns all entries instead of top 10
- * - `formattedMessage` — When `'true'`, returns Discord-formatted `text/plain` instead of JSON
+ * - `guildId` / `channelId` - Target Discord server and channel (required)
+ * - `all` - When `'true'`, returns all entries instead of top 10
+ * - `formattedMessage` - When `'true'`, returns Discord-formatted `text/plain` instead of JSON
  */
 export const kindnessCascadeQuerySchema = z.object({
   guildId: snowflakeSchema,

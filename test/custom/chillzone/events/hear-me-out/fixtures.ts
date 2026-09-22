@@ -218,7 +218,7 @@ export const MISSING_ATTRIBUTION = createMockMessage({
 });
 
 /**
- * Multiple inline mentions without an attribution line — ambiguous which is the
+ * Multiple inline mentions without an attribution line - ambiguous which is the
  * submitter, so we defer to manual review (missing-attribution).
  */
 export const MULTIPLE_INLINE_MENTIONS = createMockMessage({

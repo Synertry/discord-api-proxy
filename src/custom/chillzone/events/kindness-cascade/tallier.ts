@@ -11,8 +11,8 @@
  * Aggregates classified messages into ranked leaderboards and listing groups.
  *
  * Produces two result sections:
- * - **Ranked** — Sorted leaderboards (top-N or all) for votes and activity
- * - **Listings** — Categorized submission lists with sparse counts for edge-case types
+ * - **Ranked** - Sorted leaderboards (top-N or all) for votes and activity
+ * - **Listings** - Categorized submission lists with sparse counts for edge-case types
  *
  * Only messages with a {@link VALID_CLASSIFICATIONS valid classification} contribute
  * to the ranked leaderboards. Listings include all non-skipped classifications.
@@ -70,7 +70,7 @@ function tallyUsers(
  * Sums weighted vote counts (reaction counts) per user using a caller-supplied extractor.
  *
  * Unlike {@link tallyUsers} which counts *messages*, this sums the *reaction count*
- * associated with each user-message pair — useful for "total votes sent/received" rankings.
+ * associated with each user-message pair - useful for "total votes sent/received" rankings.
  *
  * @param messages       - Messages to aggregate over.
  * @param extractEntries - Callback that yields `{ user, votes }` pairs from each message.
