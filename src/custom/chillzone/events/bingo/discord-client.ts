@@ -144,6 +144,7 @@ export function createBingoDiscordClient(args: {
 
     let response: Response;
     let outcome: Awaited<ReturnType<typeof inspectResponse>>;
+    let released = false;
     try {
       response = await fetcher(url, {
         method: 'GET',
@@ -152,8 +153,13 @@ export function createBingoDiscordClient(args: {
       });
       outcome = await inspectResponse(response, routeKey, guildId);
       await pool.release(acq.label, acq.requestId, outcome);
+      released = true;
     } catch (err: unknown) {
-      await pool.release(acq.label, acq.requestId, { status: 599, routeKey }).catch(() => undefined);
+      if (!released) {
+        await pool.release(acq.label, acq.requestId, { status: 599, routeKey }).catch((cleanupErr: unknown) => {
+          console.error('bingo discord-client release cleanup failed:', cleanupErr);
+        });
+      }
       const message = err instanceof Error ? err.message : String(err);
       throw new DiscordApiError(0, `Network error: ${message}`);
     }
@@ -165,6 +171,7 @@ export function createBingoDiscordClient(args: {
     const retry = await pool.acquire('default', routeKey, guildId);
     if (!retry.ok) return response;
 
+    let retryReleased = false;
     try {
       const retryResponse = await fetcher(url, {
         method: 'GET',
@@ -173,9 +180,14 @@ export function createBingoDiscordClient(args: {
       });
       const retryOutcome = await inspectResponse(retryResponse, routeKey, guildId);
       await pool.release(retry.label, retry.requestId, retryOutcome);
+      retryReleased = true;
       return retryResponse;
     } catch (err: unknown) {
-      await pool.release(retry.label, retry.requestId, { status: 599, routeKey }).catch(() => undefined);
+      if (!retryReleased) {
+        await pool.release(retry.label, retry.requestId, { status: 599, routeKey }).catch((cleanupErr: unknown) => {
+          console.error('bingo discord-client retry release cleanup failed:', cleanupErr);
+        });
+      }
       const message = err instanceof Error ? err.message : String(err);
       throw new DiscordApiError(0, `Network error on retry: ${message}`);
     }

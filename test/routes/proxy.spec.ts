@@ -295,7 +295,9 @@ describe('Proxy Route (message-send body fill and opt-in typing)', () => {
   it('recomputes Content-Length after filling nonce/tts/flags grows the body', async () => {
     const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: '1' }));
     const app = createApp(mockFetch as unknown as typeof fetch);
-    const originalBody = JSON.stringify({ content: 'hi' });
+    // A multibyte character means UTF-16 .length and UTF-8 byte length diverge,
+    // so a naive .length-based Content-Length would still pass a weaker test.
+    const originalBody = JSON.stringify({ content: '💩' });
     const req = new Request(messagesUrl(), {
       method: 'POST',
       headers: {
@@ -312,6 +314,7 @@ describe('Proxy Route (message-send body fill and opt-in typing)', () => {
     const declaredLength = Number(callHeaders(mockFetch).get('Content-Length'));
     expect(sentBody.length).toBeGreaterThan(originalBody.length); // filled body grew past the original
     expect(declaredLength).toBe(new TextEncoder().encode(sentBody).byteLength);
+    expect(declaredLength).not.toBe(sentBody.length); // the multibyte emoji makes byte length != UTF-16 length
   });
 });
 

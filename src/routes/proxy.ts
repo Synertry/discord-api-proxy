@@ -176,21 +176,21 @@ proxyRoute.all('/*', async (c) => {
       mainLease = lease;
     }
 
-    const headers = await composeRequestHeaders({ token, tokenKind: kind, identity, versions, inbound: c.req.raw.headers });
-    if (typeof bodyInit === 'string') {
-      // fillMessageBody rewrote the body (nonce/tts/flags fill) - the inbound
-      // Content-Length forwarded above by composeRequestHeaders no longer
-      // matches the actual byte length; recompute it.
-      headers.set('Content-Length', String(new TextEncoder().encode(bodyInit).byteLength));
-    }
-    if (routeKey === MESSAGE_SEND_ROUTE && !headers.has('X-Context-Properties')) {
-      const contextProperties = contextPropertiesFor(routeKey);
-      if (contextProperties) headers.set('X-Context-Properties', contextProperties);
-    }
-
     let mainSettled = false;
     let poolReleased = false;
     try {
+      const headers = await composeRequestHeaders({ token, tokenKind: kind, identity, versions, inbound: c.req.raw.headers });
+      if (typeof bodyInit === 'string') {
+        // fillMessageBody rewrote the body (nonce/tts/flags fill) - the inbound
+        // Content-Length forwarded above by composeRequestHeaders no longer
+        // matches the actual byte length; recompute it.
+        headers.set('Content-Length', String(new TextEncoder().encode(bodyInit).byteLength));
+      }
+      if (routeKey === MESSAGE_SEND_ROUTE && !headers.has('X-Context-Properties')) {
+        const contextProperties = contextPropertiesFor(routeKey);
+        if (contextProperties) headers.set('X-Context-Properties', contextProperties);
+      }
+
       const response = await dispatch(fetcher, discordUrl, method, headers, bodyInit);
       const outcome = await inspectResponse(response, routeKey, guildId);
 
@@ -221,10 +221,14 @@ proxyRoute.all('/*', async (c) => {
       return response;
     } catch (err: unknown) {
       if (guard && mainLease && !mainSettled) {
-        await guard.settle(mainLease.requestId, { status: 599, routeKey }).catch(() => undefined);
+        await guard.settle(mainLease.requestId, { status: 599, routeKey }).catch((cleanupErr: unknown) => {
+          console.error('PROXY guard cleanup failed:', cleanupErr);
+        });
       }
       if (usingPool && client && poolLease && !poolReleased) {
-        await client.release(poolLease.label, poolLease.requestId, { status: 599, routeKey }).catch(() => undefined);
+        await client.release(poolLease.label, poolLease.requestId, { status: 599, routeKey }).catch((cleanupErr: unknown) => {
+          console.error('PROXY pool release cleanup failed:', cleanupErr);
+        });
       }
       throw err;
     }
@@ -428,25 +432,27 @@ async function retryPool(args: {
   }
 
   const retryIdentity = poolIdentity(retry, args.versions);
-  const retryHeaders = await composeRequestHeaders({
-    token: retry.tokenSecret,
-    tokenKind: args.kind,
-    identity: retryIdentity,
-    versions: args.versions,
-    inbound: args.headers,
-  });
-  if (args.plan.routeKey === MESSAGE_SEND_ROUTE && !retryHeaders.has('X-Context-Properties')) {
-    const contextProperties = contextPropertiesFor(args.plan.routeKey);
-    if (contextProperties) retryHeaders.set('X-Context-Properties', contextProperties);
-  }
-
   try {
+    const retryHeaders = await composeRequestHeaders({
+      token: retry.tokenSecret,
+      tokenKind: args.kind,
+      identity: retryIdentity,
+      versions: args.versions,
+      inbound: args.headers,
+    });
+    if (args.plan.routeKey === MESSAGE_SEND_ROUTE && !retryHeaders.has('X-Context-Properties')) {
+      const contextProperties = contextPropertiesFor(args.plan.routeKey);
+      if (contextProperties) retryHeaders.set('X-Context-Properties', contextProperties);
+    }
+
     const retryResponse = await dispatch(args.fetcher, args.discordUrl, args.method, retryHeaders, undefined);
     const retryOutcome = await inspectResponse(retryResponse, args.plan.routeKey, args.plan.guildId);
     await args.client.release(retry.label, retry.requestId, retryOutcome);
     return retryResponse;
   } catch (err: unknown) {
-    await args.client.release(retry.label, retry.requestId, { status: 599, routeKey: args.plan.routeKey }).catch(() => undefined);
+    await args.client.release(retry.label, retry.requestId, { status: 599, routeKey: args.plan.routeKey }).catch((cleanupErr: unknown) => {
+      console.error('PROXY retryPool release cleanup failed:', cleanupErr);
+    });
     throw err;
   }
 }

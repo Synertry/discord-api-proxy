@@ -412,4 +412,32 @@ describe('admin POST /admin/client-versions/refresh', () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('both scrapes failed');
   });
+
+  it('persists both records on a successful scrape of both sources', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (url === 'https://discord.com/login') {
+          return new Response('<html>"BUILD_NUMBER":"123456"</html>', { status: 200 });
+        }
+        if (url.startsWith('https://versionhistory.googleapis.com/')) {
+          return new Response(JSON.stringify({ versions: [{ version: '131.0.6778.86' }] }), { status: 200 });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+    const app = admin();
+    const res = await adminPost(app, '/admin/client-versions/refresh', {});
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { build: { buildNumber: number } | null; chrome: { major: number } | null };
+    expect(body.build?.buildNumber).toBe(123456);
+    expect(body.chrome?.major).toBe(131);
+
+    // GET /admin/client-versions now reflects the persisted records.
+    const got = await adminGet(app, '/admin/client-versions');
+    const gotBody = (await got.json()) as { build: { buildNumber: number } | null; chrome: { major: number } | null };
+    expect(gotBody.build?.buildNumber).toBe(123456);
+    expect(gotBody.chrome?.major).toBe(131);
+  });
 });

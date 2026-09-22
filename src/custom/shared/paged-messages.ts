@@ -108,6 +108,7 @@ export async function fetchAllMessages<T extends PagedMessage>(opts: PagerOption
     if (batch.length === 0) break;
     const remaining = opts.maxMessages - allMessages.length;
     allMessages.push(...(batch.length > remaining ? batch.slice(0, remaining) : batch));
+    if (allMessages.length >= opts.maxMessages) break; // Cap reached - no further page needed, so a malformed last-id in this batch is moot.
 
     // Incomplete batch means we've reached the oldest message.
     if (batch.length < opts.pageLimit) break;
