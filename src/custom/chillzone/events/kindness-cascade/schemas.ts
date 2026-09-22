@@ -88,3 +88,9 @@ export const kindnessCascadeResponseSchema = z.object({
 export const errorResponseSchema = z.object({
   error: z.string(),
 });
+
+/** Response schema for a pre-emptive identity-guard block (429), matching `rotator/static-guard.ts`'s `blockResponse` body shape. */
+export const rateLimitResponseSchema = z.object({
+  error: z.string(),
+  retryAfter: z.number(),
+});
