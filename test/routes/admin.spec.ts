@@ -6,7 +6,7 @@
  *           https://www.boost.org/LICENSE_1_0.txt)
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { env } from 'cloudflare:test';
 import { createApp } from '../../src/index';
 
@@ -271,6 +271,41 @@ describe('admin fingerprint endpoints', () => {
     expect(body.chrome).toBeNull();
   });
 
+  it('POST /admin/static-fingerprint registers a custom profile; GET reflects profileId "custom"', async () => {
+    const app = admin();
+    const userAgent =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+    const set = await adminPost(app, '/admin/static-fingerprint', {
+      kind: 'user-premium',
+      custom: {
+        userAgent,
+        superProperties: { os: 'Windows', browser: 'Chrome', browser_user_agent: userAgent, system_locale: 'de-DE' },
+        clientHints: {
+          'Sec-CH-UA': '"Not_A Brand";v="8", "Chromium";v="131"',
+          'Sec-CH-UA-Mobile': '?0',
+          'Sec-CH-UA-Platform': '"Windows"',
+        },
+        locale: 'de-DE',
+        timezone: 'Europe/Berlin',
+      },
+    });
+    expect(set.status).toBe(200);
+    const setBody = (await set.json()) as { ok: boolean; kind: string; profileId: string };
+    expect(setBody.profileId).toBe('custom');
+
+    const got = await adminGet(app, '/admin/static-fingerprint');
+    const body = (await got.json()) as { userPremium: { profileId: string } | null };
+    expect(body.userPremium?.profileId).toBe('custom');
+  });
+
+  it('POST /admin/static-fingerprint rejects an invalid custom profile with the validator reason', async () => {
+    const app = admin();
+    const res = await adminPost(app, '/admin/static-fingerprint', { kind: 'user-default', custom: { userAgent: 'short' } });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; reason: string };
+    expect(body.reason).toBe('userAgent-invalid');
+  });
+
   it('all fingerprint endpoints require admin auth (401 without key)', async () => {
     const app = admin();
     const unauthenticated = await app.request('http://localhost/admin/fingerprint/profiles', {}, ENV_OVERRIDE);
@@ -296,5 +331,85 @@ describe('admin GET /health', () => {
     const body = (await res.json()) as { default: { count: number }; premium: { count: number } };
     expect(body.default.count).toBeGreaterThanOrEqual(1);
     expect(body.premium.count).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('admin GET /admin/identity', () => {
+  it('returns exactly one of kind or label as required, 400 on both or neither', async () => {
+    const app = admin();
+    const neither = await adminGet(app, '/admin/identity');
+    expect(neither.status).toBe(400);
+    const both = await adminGet(app, '/admin/identity?kind=user-default&label=x');
+    expect(both.status).toBe(400);
+  });
+
+  it('rejects an unknown kind with 400', async () => {
+    const app = admin();
+    const res = await adminGet(app, '/admin/identity?kind=admin-user');
+    expect(res.status).toBe(400);
+  });
+
+  it('previews the static identity for a configured kind, with the token redacted', async () => {
+    const app = admin();
+    const res = await adminGet(app, '/admin/identity?kind=user-default');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      identityKey: string;
+      profileId: string;
+      headers: Record<string, string>;
+      superProperties: Record<string, unknown>;
+      gatewayProperties: Record<string, unknown>;
+    };
+    expect(body.identityKey).toMatch(/^static:/);
+    expect(body.headers.authorization).toBe('<redacted>');
+    expect(body.headers['user-agent']).toBeTruthy();
+    expect(body.superProperties).toBeTruthy();
+    expect(body.gatewayProperties).toBeTruthy();
+  });
+
+  it('returns 404 for a kind whose token is not configured', async () => {
+    const app = admin();
+    const noPremium = { ...ENV_OVERRIDE, DISCORD_TOKEN_USER_PREMIUM: undefined };
+    const res = await app.request(
+      'http://localhost/admin/identity?kind=user-premium',
+      { headers: { 'x-auth-key': ADMIN_KEY } },
+      noPremium,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it('previews a registered pool token by label', async () => {
+    const app = admin();
+    const label = nextLabel();
+    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: VALID_TOKEN });
+    const res = await adminGet(app, `/admin/identity?label=${label}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { identityKey: string; headers: Record<string, string> };
+    expect(body.identityKey).toBe(`pool:${label}`);
+    expect(body.headers.authorization).toBe('<redacted>');
+  });
+
+  it('returns 404 for an unregistered label', async () => {
+    const app = admin();
+    const res = await adminGet(app, '/admin/identity?label=never-registered');
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('admin POST /admin/client-versions/refresh', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('returns 502 with an error body when both scrapes fail', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('unavailable', { status: 503 })),
+    );
+    const app = admin();
+    const res = await adminPost(app, '/admin/client-versions/refresh', {});
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('both scrapes failed');
   });
 });
