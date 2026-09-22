@@ -18,6 +18,10 @@ describe('isApproveCommand', () => {
 		expect(isApproveCommand('/approve\r\n')).toBe(true);
 	});
 
+	it('accepts /approve with a lone trailing CR (no newline)', () => {
+		expect(isApproveCommand('/approve\r')).toBe(true);
+	});
+
 	it('accepts /approve with trailing spaces', () => {
 		expect(isApproveCommand('/approve   ')).toBe(true);
 	});
