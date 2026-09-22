@@ -7,118 +7,202 @@
  */
 
 /**
- * @module scheduled/build-number-refresh
- * Scheduled handler: scrape Discord's current web `build_number` and persist
- * it to the token-pool DO meta key.
+ * @module scheduled/client-versions-refresh
+ * Scheduled handler: scrape both the Discord web `build_number` and the
+ * current Chrome stable major, and persist each independently to the
+ * token-pool DO's meta keys.
  *
  * Runs daily at 04:00 UTC (see `triggers.crons` in `wrangler.jsonc`). Also
- * invokable synchronously via `POST /admin/build-number/refresh`.
+ * invokable synchronously via `POST /admin/client-versions/refresh`.
  *
- * Strategy:
+ * Build-number strategy:
  *   1. GET https://discord.com/login (cheap HTML page).
- *   2. Extract the entry-chunk URL matching `/assets/web.[a-f0-9]+.js`.
- *   3. Fetch that JS bundle.
- *   4. Match `build_number:"(\d+)"` and parse.
+ *   2. Match `"BUILD_NUMBER":"(\d+)"` against `window.GLOBAL_ENV` (live shape
+ *      as of 2026-09-21).
+ *   3. Fall back to the older entry-bundle scrape (match the `/assets/web.*.js`
+ *      URL, fetch it, match `build_number:"(\d+)"`) when the regex misses -
+ *      the GLOBAL_ENV shape is Discord's own undocumented internal format and
+ *      has drifted before.
  *
- * Failure is swallowed (logged, but not rethrown): a broken scraper must NEVER
- * write a bogus value that bricks every user-token request. The DO meta key
- * is left untouched and `selectBuildNumber` will fall back to the constant
- * once the staleness ceiling is crossed.
+ * Chrome-major strategy: GET the Chrome version-history API for the current
+ * Windows stable release and take the major component of `versions[0].version`.
+ *
+ * The two scrapes are fully independent: one failing never blocks or corrupts
+ * the other's persisted record. Every failure is swallowed (logged, not
+ * rethrown) - a broken scraper must NEVER write a bogus value that bricks
+ * every user-token request. An untouched meta key just means `selectBuildNumber`
+ * / `selectChromeMajor` fall back to the fallback constant once the relevant
+ * staleness ceiling is crossed.
  */
 
-import type { BuildNumberRecord } from '../fingerprint/build-number';
+import type { BuildNumberRecord, ChromeVersionRecord, ClientVersionRecords } from '../fingerprint/versions';
 import { createTokenPoolClient, getPoolStub } from '../rotator/client';
 import type { TokenPoolDO } from '../rotator/do';
 import type { Bindings } from '../types';
 
+const CHROME_VERSION_HISTORY_URL = 'https://versionhistory.googleapis.com/v1/chrome/platforms/win/channels/stable/versions?pageSize=1';
+const USER_AGENT = 'discord-api-proxy/client-versions-refresh';
+
+function wait(ms: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, ms);
+  return promise;
+}
+
 /**
- * Scrape and persist. Returns the new record on success, or null when the
- * scrape failed (caller decides whether to surface 502 or just log).
+ * Scrape and persist both version records. Each field is `null` when its own
+ * scrape failed; the caller decides whether that (or a total failure) should
+ * surface as a 502.
  */
-export async function refreshBuildNumber(env: Bindings): Promise<BuildNumberRecord | null> {
-	const scraped = await scrapeBuildNumber();
-	if (scraped == null) return null;
+export async function refreshClientVersions(env: Bindings): Promise<ClientVersionRecords> {
+  const stub = getPoolStub(env) as unknown as DurableObjectStub<TokenPoolDO>;
+  const client = createTokenPoolClient(stub);
+  void client; // unused; we call the DO RPCs directly because the wrapper omits the setter methods
 
-	const record: BuildNumberRecord = {
-		buildNumber: scraped,
-		fetchedAt: Date.now(),
-		source: 'scraped',
-	};
+  const [buildNumber, chromeMajor] = await Promise.all([scrapeBuildNumber(), scrapeChromeMajor()]);
 
-	const stub = getPoolStub(env) as unknown as DurableObjectStub<TokenPoolDO>;
-	const client = createTokenPoolClient(stub);
-	void client; // unused; we call the DO RPC directly because the wrapper omits setBuildNumberRecord
-	await stub.setBuildNumberRecord(record);
-	return record;
+  let build: BuildNumberRecord | null = null;
+  if (buildNumber !== null) {
+    build = { buildNumber, fetchedAt: Date.now(), source: 'scraped' };
+    await stub.setBuildNumberRecord(build);
+  }
+
+  let chrome: ChromeVersionRecord | null = null;
+  if (chromeMajor !== null) {
+    chrome = { major: chromeMajor, fetchedAt: Date.now(), source: 'scraped' };
+    await stub.setChromeVersionRecord(chrome);
+  }
+
+  return { build, chrome };
 }
 
 /** Hono-shaped scheduled handler. */
-export async function scheduledBuildNumberHandler(env: Bindings): Promise<void> {
-	try {
-		const record = await refreshBuildNumber(env);
-		if (record) {
-			console.log(`[build-number] refreshed: ${record.buildNumber} (source=${record.source})`);
-		} else {
-			console.error('[build-number] scrape failed; DO meta untouched');
-		}
-	} catch (err: unknown) {
-		console.error('[build-number] scheduled handler errored:', err);
-	}
+export async function scheduledClientVersionsHandler(env: Bindings): Promise<void> {
+  try {
+    const { build, chrome } = await refreshClientVersions(env);
+    if (build) {
+      console.log(`[client-versions] build_number refreshed: ${build.buildNumber}`);
+    } else {
+      console.error('[client-versions] build_number scrape failed; DO meta untouched');
+    }
+    if (chrome) {
+      console.log(`[client-versions] chrome major refreshed: ${chrome.major}`);
+    } else {
+      console.error('[client-versions] chrome major scrape failed; DO meta untouched');
+    }
+  } catch (err: unknown) {
+    console.error('[client-versions] scheduled handler errored:', err);
+  }
 }
 
 /**
- * Fetch and parse. Returns the parsed build number, or null on any failure.
+ * Fetch and parse the Discord web build number. Tries the live
+ * `window.GLOBAL_ENV` shape first, falls back to the entry-bundle scrape.
  * No exception escapes this function.
  */
 async function scrapeBuildNumber(): Promise<number | null> {
-	let html: string;
-	try {
-		const res = await fetch('https://discord.com/login', {
-			headers: { 'User-Agent': 'discord-api-proxy/build-number-refresh' },
-			signal: AbortSignal.timeout(30_000),
-		});
-		if (!res.ok) {
-			console.error(`[build-number] /login fetch returned ${res.status}`);
-			return null;
-		}
-		html = await res.text();
-	} catch (err: unknown) {
-		console.error('[build-number] /login fetch threw:', err);
-		return null;
-	}
+  let html: string;
+  try {
+    const res = await fetch('https://discord.com/login', {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) {
+      console.error(`[client-versions] /login fetch returned ${res.status}`);
+      return null;
+    }
+    html = await res.text();
+  } catch (err: unknown) {
+    console.error('[client-versions] /login fetch threw:', err);
+    return null;
+  }
 
-	const bundleMatch = html.match(/\/assets\/web\.[a-f0-9]+\.js/);
-	if (!bundleMatch) {
-		console.error('[build-number] no entry bundle URL found in /login HTML');
-		return null;
-	}
-	const bundleUrl = `https://discord.com${bundleMatch[0]}`;
+  const globalEnvMatch = html.match(/"BUILD_NUMBER":"(\d+)"/);
+  if (globalEnvMatch) {
+    const n = parseInt(globalEnvMatch[1], 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
 
-	let bundle: string;
-	try {
-		const res = await fetch(bundleUrl, {
-			headers: { 'User-Agent': 'discord-api-proxy/build-number-refresh' },
-			signal: AbortSignal.timeout(60_000),
-		});
-		if (!res.ok) {
-			console.error(`[build-number] bundle fetch returned ${res.status}`);
-			return null;
-		}
-		bundle = await res.text();
-	} catch (err: unknown) {
-		console.error('[build-number] bundle fetch threw:', err);
-		return null;
-	}
+  // Discord hard rule: >= 1s between any two REST calls to a Discord host,
+  // even a plain GET scrape - the fallback fetch below hits
+  // discord.com/assets/*, the same host as the /login request above.
+  await wait(1000);
+  return await scrapeBuildNumberFromBundle(html);
+}
 
-	const buildMatch = bundle.match(/build_number:"(\d+)"/);
-	if (!buildMatch) {
-		console.error('[build-number] no build_number reference in bundle');
-		return null;
-	}
-	const n = parseInt(buildMatch[1], 10);
-	if (!Number.isFinite(n) || n <= 0) {
-		console.error('[build-number] parsed build_number is not a positive integer:', buildMatch[1]);
-		return null;
-	}
-	return n;
+/** Older fallback scrape: find the entry JS bundle and match `build_number:"(\d+)"` inside it. */
+async function scrapeBuildNumberFromBundle(loginHtml: string): Promise<number | null> {
+  const bundleMatch = loginHtml.match(/\/assets\/web\.[a-f0-9]+\.js/);
+  if (!bundleMatch) {
+    console.error('[client-versions] no BUILD_NUMBER and no entry bundle URL found in /login HTML');
+    return null;
+  }
+  const bundleUrl = `https://discord.com${bundleMatch[0]}`;
+
+  let bundle: string;
+  try {
+    const res = await fetch(bundleUrl, {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) {
+      console.error(`[client-versions] bundle fetch returned ${res.status}`);
+      return null;
+    }
+    bundle = await res.text();
+  } catch (err: unknown) {
+    console.error('[client-versions] bundle fetch threw:', err);
+    return null;
+  }
+
+  const buildMatch = bundle.match(/build_number:"(\d+)"/);
+  if (!buildMatch) {
+    console.error('[client-versions] no build_number reference in bundle');
+    return null;
+  }
+  const n = parseInt(buildMatch[1], 10);
+  if (!Number.isFinite(n) || n <= 0) {
+    console.error('[client-versions] parsed build_number is not a positive integer:', buildMatch[1]);
+    return null;
+  }
+  return n;
+}
+
+/** Fetch and parse the current Chrome stable major for Windows. No exception escapes this function. */
+async function scrapeChromeMajor(): Promise<number | null> {
+  let json: unknown;
+  try {
+    const res = await fetch(CHROME_VERSION_HISTORY_URL, { signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) {
+      console.error(`[client-versions] version-history fetch returned ${res.status}`);
+      return null;
+    }
+    json = await res.json();
+  } catch (err: unknown) {
+    console.error('[client-versions] version-history fetch threw:', err);
+    return null;
+  }
+
+  const versionString = extractFirstVersionString(json);
+  if (typeof versionString !== 'string') {
+    console.error('[client-versions] version-history response missing versions[0].version');
+    return null;
+  }
+  const major = parseInt(versionString.split('.')[0] ?? '', 10);
+  if (!Number.isFinite(major) || major < 100 || major > 999) {
+    console.error('[client-versions] parsed Chrome major out of plausible range:', versionString);
+    return null;
+  }
+  return major;
+}
+
+/** Narrow the Chrome version-history JSON response to `versions[0].version` without an unchecked cast. */
+function extractFirstVersionString(json: unknown): string | undefined {
+  if (typeof json !== 'object' || json === null || !('versions' in json)) return undefined;
+  const versions = json.versions;
+  if (!Array.isArray(versions) || versions.length === 0) return undefined;
+  const first: unknown = versions[0];
+  if (typeof first !== 'object' || first === null || !('version' in first)) return undefined;
+  const version = first.version;
+  return typeof version === 'string' ? version : undefined;
 }
