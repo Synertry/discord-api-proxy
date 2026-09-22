@@ -16,6 +16,28 @@ Thank you for your interest in contributing!
 5. If logic changes, regenerating types might be needed: `bun run cf-typegen`
 6. Push to your fork and submit a PR to the **`main`** branch.
 
+## Local Development
+
+```bash
+bun install                # install dependencies
+bun run cf-typegen         # regenerate worker-configuration.d.ts
+bun wrangler dev           # local dev server on http://127.0.0.1:8787
+```
+
+`wrangler dev` reads runtime secrets from a gitignored `.dev.vars` file at the repo root. At minimum it needs a bot token, a user token, and an API key; see the README's Setup section for the full optional set (`DISCORD_TOKEN_USER_PREMIUM`, `AUTH_KEY_PREMIUM`, `AUTH_KEY_ADMIN`).
+
+```env
+DISCORD_TOKEN_BOT=your-bot-token
+DISCORD_TOKEN_USER=your-user-token
+AUTH_KEY=your-api-key
+```
+
+Smoke-test the server:
+
+```bash
+curl http://127.0.0.1:8787/healthcheck
+```
+
 ## Code Style
 
 - We use **Prettier** for formatting.

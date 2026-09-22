@@ -18,90 +18,180 @@ on:
         type: string
         description: 'Target Pull Request Number (e.g., 42)'
 
+# Serializes every path that can end in a fast-forward push to production, so
+# two near-simultaneous approvals (e.g. a review submitted right after a
+# `/approve` comment) can never race the same push.
+concurrency:
+  group: fast-forward-production
+  cancel-in-progress: false
+
 jobs:
   merge:
     name: Execute Fast-Forward Push
     runs-on: ubuntu-latest
     # Without this job-level gate, every comment in the repo would trigger a
     # runner. Pass through other event types and let step-level `if:`s decide.
+    # The exact-command check itself happens in the Verify Comment Command step
+    # below (via approval-gate.ts); this coarse `startsWith` only avoids
+    # spinning up a runner for comments that clearly aren't the command.
     if: |
       github.event_name != 'issue_comment' ||
       (github.event.issue.pull_request != null && startsWith(github.event.comment.body, '/approve'))
     permissions:
       contents: write
       pull-requests: write
+      issues: write  # gh pr edit --add-label/--remove-label hits the Issues Labels REST endpoint, not covered by pull-requests: write alone
     outputs:
       target_sha: ${{ steps.validate.outputs.validated_sha }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+        with:
+          # A full clone is required to ensure the local runner has the correct references to push.
+          fetch-depth: 0
+          token: ${{ secrets.PAT }}  # PAT required, GITHUB_TOKEN pushes don't trigger workflows
+
+      - uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: latest
+
       - name: Extract Review Event Data
         id: review_data
         if: github.event_name == 'pull_request_review' && github.event.review.state == 'approved'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TARGET_SHA_VALUE: ${{ github.event.pull_request.head.sha }}
+          BASE_REF_VALUE: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF_VALUE: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER_VALUE: ${{ github.event.pull_request.number }}
+          REVIEWER: ${{ github.event.review.user.login }}
         run: |
-          echo "TARGET_SHA=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
-          echo "BASE_REF=${{ github.event.pull_request.base.ref }}" >> "$GITHUB_OUTPUT"
-          echo "HEAD_REF=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_OUTPUT"
+          # A public repo lets any account submit a review, so an "approved"
+          # review is gated on the same collaborator-role check as `/approve`.
+          PERMISSION=$(gh api "repos/${REPO}/collaborators/$REVIEWER/permission" --jq '.permission' 2>/dev/null || echo "none")
+          echo "Reviewer '$REVIEWER' has permission '$PERMISSION'."
+          case "$PERMISSION" in
+            admin|maintain|write) ;;
+            *) echo "Insufficient permission. Halting."; exit 0 ;;
+          esac
+          echo "TARGET_SHA=$TARGET_SHA_VALUE" >> "$GITHUB_OUTPUT"
+          echo "BASE_REF=$BASE_REF_VALUE" >> "$GITHUB_OUTPUT"
+          echo "HEAD_REF=$HEAD_REF_VALUE" >> "$GITHUB_OUTPUT"
+          echo "PR_NUMBER=$PR_NUMBER_VALUE" >> "$GITHUB_OUTPUT"
 
       - name: Extract Label Event Data
         id: label_data
         if: github.event_name == 'pull_request' && github.event.label.name == 'status/approved'
+        env:
+          TARGET_SHA_VALUE: ${{ github.event.pull_request.head.sha }}
+          BASE_REF_VALUE: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF_VALUE: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER_VALUE: ${{ github.event.pull_request.number }}
         run: |
-          echo "TARGET_SHA=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
-          echo "BASE_REF=${{ github.event.pull_request.base.ref }}" >> "$GITHUB_OUTPUT"
-          echo "HEAD_REF=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_OUTPUT"
+          echo "TARGET_SHA=$TARGET_SHA_VALUE" >> "$GITHUB_OUTPUT"
+          echo "BASE_REF=$BASE_REF_VALUE" >> "$GITHUB_OUTPUT"
+          echo "HEAD_REF=$HEAD_REF_VALUE" >> "$GITHUB_OUTPUT"
+          echo "PR_NUMBER=$PR_NUMBER_VALUE" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Comment Command
+        id: verify_command
+        if: github.event_name == 'issue_comment'
+        env:
+          GATE_MODE: comment
+          GATE_VALUE: ${{ github.event.comment.body }}
+        run: bun .github/scripts/approval-gate.ts
 
       - name: Verify Comment Author Permission
         id: verify_commenter
-        if: github.event_name == 'issue_comment'
+        if: github.event_name == 'issue_comment' && steps.verify_command.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           COMMENT_USER: ${{ github.event.comment.user.login }}
         run: |
           # Gate the command on the commenter's repo role. Triage is insufficient,
           # only write/maintain/admin can trigger the fast-forward. Errors (e.g.
           # commenter is not a collaborator at all) fall back to "none" so the gate
           # fails closed.
-          PERMISSION=$(gh api "repos/${{ github.repository }}/collaborators/$COMMENT_USER/permission" --jq '.permission' 2>/dev/null || echo "none")
+          PERMISSION=$(gh api "repos/${REPO}/collaborators/$COMMENT_USER/permission" --jq '.permission' 2>/dev/null || echo "none")
           echo "Commenter '$COMMENT_USER' has permission '$PERMISSION'."
           case "$PERMISSION" in
             admin|maintain|write) echo "authorized=true" >> "$GITHUB_OUTPUT" ;;
             *) echo "Insufficient permission. Halting." ;;
           esac
 
-      - name: Extract Comment Command Data
-        id: comment_data
+      - name: Verify Comment PR Number
+        id: verify_pr_number
         if: github.event_name == 'issue_comment' && steps.verify_commenter.outputs.authorized == 'true'
         env:
+          GATE_MODE: pr
+          GATE_VALUE: ${{ github.event.issue.number }}
+        run: bun .github/scripts/approval-gate.ts
+
+      - name: Extract Comment Command Data
+        id: comment_data
+        if: github.event_name == 'issue_comment' && steps.verify_pr_number.outputs.ok == 'true'
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           PR_NUM: ${{ github.event.issue.number }}
         run: |
-          PR_JSON=$(gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json headRefOid,baseRefName,headRefName)
+          PR_JSON=$(gh pr view "$PR_NUM" --repo "$REPO" --json headRefOid,baseRefName,headRefName)
           echo "TARGET_SHA=$(echo "$PR_JSON" | jq -r '.headRefOid')" >> "$GITHUB_OUTPUT"
           echo "BASE_REF=$(echo "$PR_JSON" | jq -r '.baseRefName')" >> "$GITHUB_OUTPUT"
           echo "HEAD_REF=$(echo "$PR_JSON" | jq -r '.headRefName')" >> "$GITHUB_OUTPUT"
+          echo "PR_NUMBER=$PR_NUM" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Dispatch PR Number
+        id: verify_dispatch_pr_number
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GATE_MODE: pr
+          GATE_VALUE: ${{ inputs.pr_number }}
+        run: bun .github/scripts/approval-gate.ts
 
       - name: Extract Manual Dispatch Data
         id: dispatch_data
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && steps.verify_dispatch_pr_number.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ inputs.pr_number }}
         run: |
-          PR_NUM="${{ inputs.pr_number }}"
-          # Fetch PR metadata via GitHub CLI and extract JSON values
-          PR_JSON=$(gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json headRefOid,baseRefName,headRefName)
+          # Fetch PR metadata via GitHub CLI and extract JSON values.
+          PR_JSON=$(gh pr view "$PR_NUM" --repo "$REPO" --json headRefOid,baseRefName,headRefName)
           echo "TARGET_SHA=$(echo "$PR_JSON" | jq -r '.headRefOid')" >> "$GITHUB_OUTPUT"
           echo "BASE_REF=$(echo "$PR_JSON" | jq -r '.baseRefName')" >> "$GITHUB_OUTPUT"
           echo "HEAD_REF=$(echo "$PR_JSON" | jq -r '.headRefName')" >> "$GITHUB_OUTPUT"
+          echo "PR_NUMBER=$PR_NUM" >> "$GITHUB_OUTPUT"
 
       - name: Validate Branch Constraints
         id: validate
         env:
-          # Coalesce outputs: only the step that executed will return a value
+          # Coalesce outputs: only the step that executed will return a value.
           TARGET_SHA: ${{ steps.review_data.outputs.TARGET_SHA || steps.label_data.outputs.TARGET_SHA || steps.comment_data.outputs.TARGET_SHA || steps.dispatch_data.outputs.TARGET_SHA }}
           BASE_REF: ${{ steps.review_data.outputs.BASE_REF || steps.label_data.outputs.BASE_REF || steps.comment_data.outputs.BASE_REF || steps.dispatch_data.outputs.BASE_REF }}
           HEAD_REF: ${{ steps.review_data.outputs.HEAD_REF || steps.label_data.outputs.HEAD_REF || steps.comment_data.outputs.HEAD_REF || steps.dispatch_data.outputs.HEAD_REF }}
+          PR_NUMBER: ${{ steps.review_data.outputs.PR_NUMBER || steps.label_data.outputs.PR_NUMBER || steps.comment_data.outputs.PR_NUMBER || steps.dispatch_data.outputs.PR_NUMBER }}
         run: |
           if [ -z "$TARGET_SHA" ]; then
             echo "Trigger condition not met. Halting execution."
+            exit 0
+          fi
+
+          # GITHUB_OUTPUT is ambient in every step (the runner points it at a
+          # shared per-job file); overriding it to an empty string here makes
+          # approval-gate.ts fall back to printing "ok=<bool>" on stdout instead
+          # of appending to that shared file, so these four inline validations
+          # never mix with each other or with earlier steps' own `ok=` outputs.
+          SHA_OK=$(GATE_MODE=sha GATE_VALUE="$TARGET_SHA" GITHUB_OUTPUT="" bun .github/scripts/approval-gate.ts | cut -d= -f2)
+          BASE_OK=$(GATE_MODE=branch GATE_VALUE="$BASE_REF" GITHUB_OUTPUT="" bun .github/scripts/approval-gate.ts | cut -d= -f2)
+          HEAD_OK=$(GATE_MODE=branch GATE_VALUE="$HEAD_REF" GITHUB_OUTPUT="" bun .github/scripts/approval-gate.ts | cut -d= -f2)
+          PR_OK=$(GATE_MODE=pr GATE_VALUE="$PR_NUMBER" GITHUB_OUTPUT="" bun .github/scripts/approval-gate.ts | cut -d= -f2)
+
+          if [ "$SHA_OK" != "true" ] || [ "$BASE_OK" != "true" ] || [ "$HEAD_OK" != "true" ] || [ "$PR_OK" != "true" ]; then
+            echo "Malformed SHA/branch/PR-number input. Halting."
             exit 0
           fi
 
@@ -111,19 +201,39 @@ jobs:
           fi
 
           echo "validated_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout repository
-        if: steps.validate.outputs.validated_sha != ''
-        uses: actions/checkout@v7.0.1
-        with:
-          # A full clone is required to ensure the local runner has the correct references to push
-          fetch-depth: 0
-          token: ${{ secrets.PAT }}  # PAT required, GITHUB_TOKEN pushes don't trigger workflows
+          echo "validated_pr=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Fast-forward production branch
         if: steps.validate.outputs.validated_sha != ''
         env:
           GH_TOKEN: ${{ secrets.PAT }}
+          TARGET_SHA: ${{ steps.validate.outputs.validated_sha }}
         run: |
-          # Push the exact commit SHA of the approved PR head directly to the production reference
-          git push origin ${{ steps.validate.outputs.validated_sha }}:refs/heads/production
+          # Push the exact commit SHA of the approved PR head directly to the production reference.
+          git push origin "$TARGET_SHA":refs/heads/production
+
+      - name: Sync approval labels
+        # Independent of the main -> production routing check: status/approved
+        # can be applied to any PR (e.g. a large main-targeting PR labeled by
+        # pull-request-size.yaml), not only ones eligible for the fast-forward
+        # push. The push itself stays gated on validated_sha above.
+        if: |
+          steps.validate.outputs.validated_sha != '' ||
+          (github.event_name == 'pull_request' && github.event.label.name == 'status/approved')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # not PAT: label edits shouldn't re-trigger this workflow's own `labeled` listener
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.validate.outputs.validated_pr || steps.label_data.outputs.PR_NUMBER }}
+        # A label-sync failure (e.g. transient API error, missing permission)
+        # must never mark this job failed - the production push above already
+        # succeeded by the time this step runs, and a red job could tempt a
+        # retry that repeats the push. The gh command's own stdout/stderr still
+        # surface in the step log for debugging.
+        continue-on-error: true
+        run: |
+          # status/approved is the terminal state: ensure it's set and drop the
+          # two pending-review labels, regardless of which trigger got us here.
+          gh pr edit "$PR_NUMBER" --repo "$REPO" \
+            --add-label "status/approved" \
+            --remove-label "status/approval-pending" \
+            --remove-label "status/review-needed"

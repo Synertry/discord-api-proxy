@@ -177,3 +177,5 @@ jobs:
       run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     secrets:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      RELAY_AUTH_KEY: ${{ secrets.RELAY_AUTH_KEY }}
+      RELAY_DOMAIN: ${{ secrets.RELAY_DOMAIN }}
