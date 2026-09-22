@@ -39,6 +39,7 @@ import type { BuildNumberRecord, ChromeVersionRecord, ClientVersionRecords } fro
 import type {
   AcquireResult,
   BucketBudget,
+  IdentityBlock,
   IdentityCircuit,
   IneligibleGuild,
   LeaseStaticResult,
@@ -143,13 +144,13 @@ function hydrateBudget<T extends Partial<BucketBudget>>(raw: T): T & BucketBudge
 }
 
 /** A fresh, empty guard for a static identity never seen before. */
-function freshStaticGuard(tokenHash: string, now: number): StaticIdentityState {
-  return { tokenHash, lastSeenAt: now, pendingLeases: [], ...emptyBudget() };
+function freshStaticGuard(identityHash: string, now: number): StaticIdentityState {
+  return { identityHash, lastSeenAt: now, pendingLeases: [], ...emptyBudget() };
 }
 
 /** Hydrate a static-guard record read from storage, tolerating a record written before `pendingLeases` existed. */
-function hydrateStaticGuard(raw: StaticIdentityState, tokenHash: string): StaticIdentityState {
-  return { ...hydrateBudget(raw), tokenHash, pendingLeases: raw.pendingLeases ?? [] };
+function hydrateStaticGuard(raw: StaticIdentityState, identityHash: string): StaticIdentityState {
+  return { ...hydrateBudget(raw), identityHash, pendingLeases: raw.pendingLeases ?? [] };
 }
 
 /** Drop leases older than `STALE_LEASE_TTL_MS`: their request evidently crashed or hung before settling. */
@@ -302,40 +303,60 @@ export class TokenPoolDO extends DurableObject<Bindings> {
   }
 
   /**
-   * Read-only identity peek for a static kind: fingerprint + live client
-   * versions, no eligibility check, no lease, no mutation. Called once per
-   * request by the identity middleware to build the response headers; the
-   * actual budget reservation happens per-outbound-fetch via `leaseStatic`.
+   * Read-only identity peek: fingerprint for `kind` (kind-keyed, operator UX)
+   * + live client versions (DO-wide), plus a circuit-only `block` for
+   * `identityHash` when the DO-wide upstream circuit or this identity's own
+   * captcha circuit is currently open. No bucket/dispatch-gap check (that
+   * only happens at `leaseStatic` time), no lease, no mutation, never
+   * creates a guard record for a hash that hasn't leased yet. Called once
+   * per request by the identity middleware to build the response headers
+   * and to let it short-circuit an already-blocked identity early.
    */
-  async prepareStatic(kind: StaticTokenKind): Promise<StaticPrepareResult> {
+  async prepareStatic(identityHash: string, kind: StaticTokenKind): Promise<StaticPrepareResult> {
+    const now = Date.now();
+    const guardKey = `${STATIC_GUARD_PREFIX}${identityHash}`;
     const map = await this.ctx.storage.get<unknown>([
       `${STATIC_FINGERPRINT_PREFIX}${kind}`,
       BUILD_NUMBER_META_KEY,
       CHROME_VERSION_META_KEY,
+      guardKey,
+      META_UPSTREAM_CIRCUIT_KEY,
     ]);
+
+    const upstreamCircuit = (map.get(META_UPSTREAM_CIRCUIT_KEY) as IdentityCircuit | undefined) ?? null;
+    const guardCircuit = (map.get(guardKey) as StaticIdentityState | undefined)?.circuit ?? null;
+    let block: IdentityBlock | null = null;
+    if (upstreamCircuit && upstreamCircuit.until > now) {
+      block = { reason: 'cooldown', retryAfter: upstreamCircuit.until - now, signal: upstreamCircuit.signal };
+    } else if (guardCircuit && guardCircuit.until > now) {
+      block = { reason: 'cooldown', retryAfter: guardCircuit.until - now, signal: guardCircuit.signal };
+    }
+
     return {
       fingerprint: (map.get(`${STATIC_FINGERPRINT_PREFIX}${kind}`) as StaticFingerprintRecord | undefined) ?? null,
       versions: {
         build: (map.get(BUILD_NUMBER_META_KEY) as BuildNumberRecord | undefined) ?? null,
         chrome: (map.get(CHROME_VERSION_META_KEY) as ChromeVersionRecord | undefined) ?? null,
       },
+      block,
     };
   }
 
   /**
    * Reserve the budget for one outbound fetch on `routeKey`, immediately
-   * before dispatching it. `tokenHash` (see `token-hash.ts`) keys the
-   * guard state, not `kind`: two static kinds may be the same underlying
-   * token, and kind alone would let it accumulate two independent budgets.
-   * On success, records the issued lease in `pendingLeases` so `settleStatic`
-   * can validate against it; rejects with `reason: 'capacity'` at
-   * `PENDING_LEASE_CAP` rather than evicting a still-outstanding lease.
+   * before dispatching it. `identityHash` (see `token-hash.ts`) is the ONLY
+   * identity-scoping argument, never `kind` - not even for logging, which
+   * uses a truncated hash instead so it never doubles as a second, kind-keyed
+   * identity label in the logs. On success, records the issued lease in
+   * `pendingLeases` so `settleStatic` can validate against it; rejects with
+   * `reason: 'capacity'` at `PENDING_LEASE_CAP` rather than evicting a still-
+   * outstanding lease.
    */
-  async leaseStatic(kind: StaticTokenKind, tokenHash: string, routeKey: RouteKey): Promise<LeaseStaticResult> {
+  async leaseStatic(identityHash: string, routeKey: RouteKey): Promise<LeaseStaticResult> {
     const now = Date.now();
-    const guardKey = `${STATIC_GUARD_PREFIX}${tokenHash}`;
+    const guardKey = `${STATIC_GUARD_PREFIX}${identityHash}`;
     const [raw, upstreamCircuit] = await Promise.all([this.ctx.storage.get<StaticIdentityState>(guardKey), this.getUpstreamCircuit()]);
-    const guard: StaticIdentityState = raw ? hydrateStaticGuard(raw, tokenHash) : freshStaticGuard(tokenHash, now);
+    const guard: StaticIdentityState = raw ? hydrateStaticGuard(raw, identityHash) : freshStaticGuard(identityHash, now);
     guard.pendingLeases = prunePendingLeases(guard.pendingLeases, now);
 
     const eligibility = evaluateBudget(guard, routeKey, now, upstreamCircuit);
@@ -343,7 +364,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
       return { ok: false, block: { reason: 'cooldown', retryAfter: eligibility.retryAfter, signal: eligibility.signal } };
     }
     if (guard.pendingLeases.length >= PENDING_LEASE_CAP) {
-      console.error('IDENTITY_GUARD pending-lease cap reached', { identity: `static:${kind}`, cap: PENDING_LEASE_CAP });
+      console.error('IDENTITY_GUARD pending-lease cap reached', { identity: `static:${identityHash.slice(0, 8)}`, cap: PENDING_LEASE_CAP });
       return { ok: false, block: { reason: 'capacity', retryAfter: 1000 } };
     }
 
@@ -364,19 +385,19 @@ export class TokenPoolDO extends DurableObject<Bindings> {
    * for this identity - an unknown id, a replayed duplicate of an
    * already-settled lease, or one pruned as abandoned all land here safely.
    */
-  async settleStatic(kind: StaticTokenKind, tokenHash: string, requestId: string, outcome: ReleaseInput): Promise<void> {
+  async settleStatic(identityHash: string, requestId: string, outcome: ReleaseInput): Promise<void> {
     const now = Date.now();
-    const guardKey = `${STATIC_GUARD_PREFIX}${tokenHash}`;
+    const guardKey = `${STATIC_GUARD_PREFIX}${identityHash}`;
     const raw = await this.ctx.storage.get<StaticIdentityState>(guardKey);
     if (!raw) return;
-    const guard = hydrateStaticGuard(raw, tokenHash);
+    const guard = hydrateStaticGuard(raw, identityHash);
     guard.pendingLeases = prunePendingLeases(guard.pendingLeases, now);
 
     const lease = guard.pendingLeases.find((l) => l.requestId === requestId);
     if (!lease) return; // Unknown, already-settled, or pruned-as-abandoned - drop silently, matching `release`'s stale-write guard.
     if (lease.routeKey !== outcome.routeKey) {
       console.error('IDENTITY_GUARD settle routeKey mismatch, dropping', {
-        identity: `static:${kind}`,
+        identity: `static:${identityHash.slice(0, 8)}`,
         leasedRoute: lease.routeKey,
         outcomeRoute: outcome.routeKey,
       });
@@ -393,7 +414,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
     guard.lastSeenAt = now;
     if (!before && guard.circuit) {
       console.error('IDENTITY_GUARD circuit opened', {
-        identity: `static:${kind}`,
+        identity: `static:${identityHash.slice(0, 8)}`,
         signal: guard.circuit.signal,
         until: guard.circuit.until,
       });

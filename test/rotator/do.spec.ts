@@ -14,7 +14,8 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
-import { STATIC_GUARD_PREFIX, PENDING_LEASE_CAP, type TokenPoolDO } from '../../src/rotator/do';
+import { STATIC_GUARD_PREFIX, PENDING_LEASE_CAP } from '../../src/rotator/do';
+import type { TokenPoolDO } from '../../src/rotator/do';
 import type { ReleaseInput } from '../../src/rotator/types';
 
 const VALID_TOKEN = 'A'.repeat(40) + '.' + 'B'.repeat(10) + '.' + 'C'.repeat(40);
@@ -456,108 +457,132 @@ describe('TokenPoolDO static-identity guard: prepareStatic / leaseStatic / settl
   const HASH_A = 'a'.repeat(64);
   const HASH_B = 'b'.repeat(64);
 
-  it('prepareStatic is a pure read: never blocks, never mutates, no routeKey', async () => {
+  it('prepareStatic is a pure read: never blocks, never mutates, no routeKey, no block for an unseen identity', async () => {
     const stub = freshStub();
-    const prepared = await stub.prepareStatic('user-default');
+    const prepared = await stub.prepareStatic(HASH_A, 'user-default');
     expect(prepared.fingerprint).toBeNull();
     expect(prepared.versions).toEqual({ build: null, chrome: null });
+    expect(prepared.block).toBeNull();
   });
 
   it('leaseStatic succeeds on a fresh identity and returns a requestId', async () => {
     const stub = freshStub();
-    const lease = await stub.leaseStatic('user-default', HASH_A, ROUTE);
+    const lease = await stub.leaseStatic(HASH_A, ROUTE);
     expect(lease.ok).toBe(true);
     if (lease.ok) expect(typeof lease.requestId).toBe('string');
   });
 
-  it('after settleStatic with a 429, a subsequent leaseStatic for the same tokenHash is blocked with cooldown', async () => {
+  it('after settleStatic with a 429, a subsequent leaseStatic for the same identityHash is blocked with cooldown', async () => {
     const stub = freshStub();
-    const lease = await stub.leaseStatic('user-default', HASH_A, ROUTE);
+    const lease = await stub.leaseStatic(HASH_A, ROUTE);
     if (!lease.ok) throw new Error('expected ok lease');
-    await stub.settleStatic('user-default', HASH_A, lease.requestId, { status: 429, routeKey: ROUTE, retryAfterMs: 2000 });
+    await stub.settleStatic(HASH_A, lease.requestId, { status: 429, routeKey: ROUTE, retryAfterMs: 2000 });
 
-    const second = await stub.leaseStatic('user-default', HASH_A, ROUTE);
+    const second = await stub.leaseStatic(HASH_A, ROUTE);
     expect(second.ok).toBe(false);
     if (!second.ok) expect(second.block.reason).toBe('cooldown');
   });
 
-  it('a captcha signal opens a circuit that blocks this identity for about 30 minutes', async () => {
+  it('a captcha signal opens a circuit that blocks this identity for about 30 minutes, surfaced by both leaseStatic and prepareStatic', async () => {
     const stub = freshStub();
-    const lease = await stub.leaseStatic('user-default', HASH_A, ROUTE);
+    const lease = await stub.leaseStatic(HASH_A, ROUTE);
     if (!lease.ok) throw new Error('expected ok lease');
-    await stub.settleStatic('user-default', HASH_A, lease.requestId, { status: 400, routeKey: ROUTE, signal: 'captcha' });
+    await stub.settleStatic(HASH_A, lease.requestId, { status: 400, routeKey: ROUTE, signal: 'captcha' });
 
-    const second = await stub.leaseStatic('user-default', HASH_A, ROUTE);
+    const second = await stub.leaseStatic(HASH_A, ROUTE);
     expect(second.ok).toBe(false);
     if (!second.ok) {
       expect(second.block.reason).toBe('cooldown');
       expect(second.block.signal).toBe('captcha');
       expect(second.block.retryAfter).toBeGreaterThan(29 * 60 * 1000);
     }
+
+    // prepareStatic's read-only circuit peek sees the same open circuit
+    // without ever attempting a lease - this is what lets the identity
+    // middleware short-circuit a definitely-blocked static request before
+    // it reaches downstream middleware, with nothing ever reserved.
+    const prepared = await stub.prepareStatic(HASH_A, 'user-default');
+    expect(prepared.block?.signal).toBe('captcha');
+    expect(prepared.block?.retryAfter).toBeGreaterThan(29 * 60 * 1000);
+
+    // A different identity's prepareStatic peek is unaffected.
+    const preparedOther = await stub.prepareStatic(HASH_B, 'user-default');
+    expect(preparedOther.block).toBeNull();
   });
 
-  it('two static kinds sharing the same underlying token (same tokenHash) share one budget, not two', async () => {
+  it('two static kinds sharing the same underlying token (same identityHash) share one budget, not two', async () => {
     const stub = freshStub();
-    const leaseDefault = await stub.leaseStatic('user-default', HASH_A, ROUTE);
+    const leaseDefault = await stub.leaseStatic(HASH_A, ROUTE);
     if (!leaseDefault.ok) throw new Error('expected ok lease');
-    await stub.settleStatic('user-default', HASH_A, leaseDefault.requestId, { status: 429, routeKey: ROUTE, retryAfterMs: 5000 });
+    await stub.settleStatic(HASH_A, leaseDefault.requestId, { status: 429, routeKey: ROUTE, retryAfterMs: 5000 });
 
-    // Same tokenHash, different kind: still blocked, because the budget is keyed by hash, not kind.
-    const leasePremium = await stub.leaseStatic('user-premium', HASH_A, ROUTE);
+    // Same identityHash: still blocked, because the budget is keyed by hash,
+    // never by kind - the caller passes the identical hash regardless of
+    // which slot (`user-default` vs `user-premium`) the request came from.
+    const leasePremium = await stub.leaseStatic(HASH_A, ROUTE);
     expect(leasePremium.ok).toBe(false);
+
+    // prepareStatic for either kind sees the same shared circuit/fingerprint
+    // state too, since only the identityHash - not the kind - selects the
+    // guard record; only the fingerprint lookup itself stays kind-scoped.
+    const preparedDefault = await stub.prepareStatic(HASH_A, 'user-default');
+    const preparedPremium = await stub.prepareStatic(HASH_A, 'user-premium');
+    expect(preparedDefault.block).toEqual(preparedPremium.block);
   });
 
-  it('a different tokenHash is an independent budget', async () => {
+  it('a different identityHash is an independent budget', async () => {
     const stub = freshStub();
-    const leaseA = await stub.leaseStatic('user-default', HASH_A, ROUTE);
+    const leaseA = await stub.leaseStatic(HASH_A, ROUTE);
     if (!leaseA.ok) throw new Error('expected ok lease');
-    await stub.settleStatic('user-default', HASH_A, leaseA.requestId, { status: 429, routeKey: ROUTE, retryAfterMs: 5000 });
+    await stub.settleStatic(HASH_A, leaseA.requestId, { status: 429, routeKey: ROUTE, retryAfterMs: 5000 });
 
-    const leaseB = await stub.leaseStatic('user-default', HASH_B, ROUTE);
+    const leaseB = await stub.leaseStatic(HASH_B, ROUTE);
     expect(leaseB.ok).toBe(true);
   });
 
   it('settleStatic with an unknown requestId is a silent no-op', async () => {
     const stub = freshStub();
-    await expect(stub.settleStatic('user-default', HASH_A, 'never-issued', { status: 200, routeKey: ROUTE })).resolves.toBeUndefined();
+    await expect(stub.settleStatic(HASH_A, 'never-issued', { status: 200, routeKey: ROUTE })).resolves.toBeUndefined();
   });
 
   it('settleStatic with a mismatched routeKey does not consume the lease (defense against a malformed settle)', async () => {
     const stub = freshStub();
-    const lease = await stub.leaseStatic('user-default', HASH_A, ROUTE);
+    const lease = await stub.leaseStatic(HASH_A, ROUTE);
     if (!lease.ok) throw new Error('expected ok lease');
-    await stub.settleStatic('user-default', HASH_A, lease.requestId, {
+    await stub.settleStatic(HASH_A, lease.requestId, {
       status: 429,
       routeKey: 'GET:/some/other/route',
       retryAfterMs: 9999,
     });
 
     // The mismatched settle must not have applied its 429 to the real lease's identity.
-    const second = await stub.leaseStatic('user-default', HASH_A, ROUTE);
+    const second = await stub.leaseStatic(HASH_A, ROUTE);
     expect(second.ok).toBe(true);
   });
 
   it('settleStatic is idempotent: a duplicate call with the same requestId does not double-apply', async () => {
     const stub = freshStub();
-    const lease = await stub.leaseStatic('user-default', HASH_A, ROUTE);
+    const lease = await stub.leaseStatic(HASH_A, ROUTE);
     if (!lease.ok) throw new Error('expected ok lease');
-    await stub.settleStatic('user-default', HASH_A, lease.requestId, { status: 429, routeKey: ROUTE, retryAfterMs: 1000 });
+    await stub.settleStatic(HASH_A, lease.requestId, { status: 429, routeKey: ROUTE, retryAfterMs: 1000 });
     // Second call with the same requestId: already removed from pendingLeases, so this is a no-op.
     await expect(
-      stub.settleStatic('user-default', HASH_A, lease.requestId, { status: 429, routeKey: ROUTE, retryAfterMs: 99999 }),
+      stub.settleStatic(HASH_A, lease.requestId, { status: 429, routeKey: ROUTE, retryAfterMs: 99999 }),
     ).resolves.toBeUndefined();
   });
 
-  it('a Cloudflare signal opens the DO-wide upstream circuit, blocking every identity', async () => {
+  it('a Cloudflare signal opens the DO-wide upstream circuit, blocking every identity (leaseStatic, prepareStatic, and the pool)', async () => {
     const stub = freshStub();
-    const lease = await stub.leaseStatic('user-default', HASH_A, ROUTE);
+    const lease = await stub.leaseStatic(HASH_A, ROUTE);
     if (!lease.ok) throw new Error('expected ok lease');
-    await stub.settleStatic('user-default', HASH_A, lease.requestId, { status: 403, routeKey: ROUTE, signal: 'cloudflare' });
+    await stub.settleStatic(HASH_A, lease.requestId, { status: 403, routeKey: ROUTE, signal: 'cloudflare' });
 
-    // A completely different identity (different hash) is also blocked.
-    const other = await stub.leaseStatic('user-premium', HASH_B, ROUTE);
+    // A completely different identity (different hash) is also blocked, both at lease time and at the prepare-time peek.
+    const other = await stub.leaseStatic(HASH_B, ROUTE);
     expect(other.ok).toBe(false);
     if (!other.ok) expect(other.block.signal).toBe('cloudflare');
+    const preparedOther = await stub.prepareStatic(HASH_B, 'user-default');
+    expect(preparedOther.block?.signal).toBe('cloudflare');
 
     // The pool is blocked too - acquire on a registered token also sees the upstream circuit.
     await stub.register({ label: 'tok', slot: 'default', tokenSecret: VALID_TOKEN });
@@ -581,7 +606,7 @@ describe('TokenPoolDO static-identity guard: prepareStatic / leaseStatic / settl
     }));
     await runInDurableObject(stub, async (_instance, state) => {
       await state.storage.put(`${STATIC_GUARD_PREFIX}${HASH_A}`, {
-        tokenHash: HASH_A,
+        identityHash: HASH_A,
         lastSeenAt: now,
         lastDispatchAt: now - 10_000, // Well past MIN_DISPATCH_GAP_MS so only the capacity check is exercised below.
         bucketStates: {},
@@ -592,25 +617,25 @@ describe('TokenPoolDO static-identity guard: prepareStatic / leaseStatic / settl
       });
     });
 
-    const overCap = await stub.leaseStatic('user-default', HASH_A, 'GET:/route-over-cap');
+    const overCap = await stub.leaseStatic(HASH_A, 'GET:/route-over-cap');
     expect(overCap.ok).toBe(false);
     if (!overCap.ok) expect(overCap.block.reason).toBe('capacity');
 
     // Settling one of the seeded leases frees capacity for the next real
     // lease - proves the rejected lease above never evicted a seeded entry.
-    await stub.settleStatic('user-default', HASH_A, 'seed-0', { status: 200, routeKey: 'GET:/seed-route-0' });
-    const afterSettle = await stub.leaseStatic('user-default', HASH_A, 'GET:/route-after-settle');
+    await stub.settleStatic(HASH_A, 'seed-0', { status: 200, routeKey: 'GET:/seed-route-0' });
+    const afterSettle = await stub.leaseStatic(HASH_A, 'GET:/route-after-settle');
     expect(afterSettle.ok).toBe(true);
   });
 
   it('concurrent leaseStatic calls for the same identity serialize correctly: only one succeeds within the dispatch-gap floor', async () => {
     const stub = freshStub();
     const results = await Promise.all([
-      stub.leaseStatic('user-default', HASH_A, ROUTE),
-      stub.leaseStatic('user-default', HASH_A, ROUTE),
-      stub.leaseStatic('user-default', HASH_A, ROUTE),
-      stub.leaseStatic('user-default', HASH_A, ROUTE),
-      stub.leaseStatic('user-default', HASH_A, ROUTE),
+      stub.leaseStatic(HASH_A, ROUTE),
+      stub.leaseStatic(HASH_A, ROUTE),
+      stub.leaseStatic(HASH_A, ROUTE),
+      stub.leaseStatic(HASH_A, ROUTE),
+      stub.leaseStatic(HASH_A, ROUTE),
     ]);
     const succeeded = results.filter((r) => r.ok);
     // Cloudflare's input gates serialize these five RPC calls against the
@@ -623,10 +648,10 @@ describe('TokenPoolDO static-identity guard: prepareStatic / leaseStatic / settl
     expect(requestIds.size).toBe(1);
   });
 
-  it('leaseStatic calls for different tokenHashes on the same DO instance are independent budgets, even issued concurrently', async () => {
+  it('leaseStatic calls for different identityHashes on the same DO instance are independent budgets, even issued concurrently', async () => {
     const stub = freshStub();
-    const results = await Promise.all(Array.from({ length: 5 }, (_, i) => stub.leaseStatic('user-default', `${i}`.repeat(64), ROUTE)));
-    // Each call uses a distinct tokenHash against the same DO instance, so
+    const results = await Promise.all(Array.from({ length: 5 }, (_, i) => stub.leaseStatic(`${i}`.repeat(64), ROUTE)));
+    // Each call uses a distinct identityHash against the same DO instance, so
     // none contend with each other on lastDispatchAt, bucket state, or
     // pendingLeases - proving the guard is genuinely keyed per-hash rather
     // than accidentally shared DO-wide (only the upstream circuit is DO-wide).
@@ -638,9 +663,9 @@ describe('TokenPoolDO static-identity guard: prepareStatic / leaseStatic / settl
     const outcomes = await Promise.all(
       Array.from({ length: 5 }, async (_, i) => {
         const routeKey = `GET:/concurrent-${i}`;
-        const lease = await stub.leaseStatic('user-default', HASH_A, routeKey);
+        const lease = await stub.leaseStatic(HASH_A, routeKey);
         if (!lease.ok) return lease;
-        await stub.settleStatic('user-default', HASH_A, lease.requestId, { status: 200, routeKey });
+        await stub.settleStatic(HASH_A, lease.requestId, { status: 200, routeKey });
         return lease;
       }),
     );

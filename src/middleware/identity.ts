@@ -47,7 +47,9 @@ import { deriveRouteKey, extractGuildId, isRotatableRoute } from '../rotator/buc
 import { createTokenPoolClient, getPoolStub } from '../rotator/client';
 import { resolveClientVersions } from '../fingerprint/versions';
 import { resolveProfileId, resolveCustom } from '../fingerprint/profiles';
-import type { RotatorVariables, Slot, StaticPrepareResult, StaticTokenKind, TokenPoolClient } from '../rotator/types';
+import { hashToken } from '../rotator/token-hash';
+import { blockResponse } from '../rotator/static-guard';
+import type { IdentityBlock, RotatorVariables, Slot, StaticPrepareResult, StaticTokenKind, TokenPoolClient } from '../rotator/types';
 
 export const identityMiddleware = createMiddleware<{
   Bindings: Bindings;
@@ -84,7 +86,16 @@ export const identityMiddleware = createMiddleware<{
     }
   }
 
-  await resolveStaticIdentity(c, client);
+  const block = await resolveStaticIdentity(c, client);
+  // Only short-circuit on the static identity's circuit when this request is
+  // guaranteed to actually use it (not pool-eligible, or explicitly pinned
+  // via `X-Proxy-Token: static`). A pool-eligible request's static identity
+  // is only a fallback for an empty-pool/no-eligible-token case - blocking
+  // it here would wrongly reject a request the pool has plenty of capacity
+  // for, just because the unrelated static identity happens to be circuited.
+  if (block && !rotatable) {
+    return blockResponse(c, block);
+  }
 
   if (rotatable) {
     c.set('poolPlan', {
@@ -98,13 +109,24 @@ export const identityMiddleware = createMiddleware<{
   await next();
 });
 
-/** Resolve the read-only fallback identity (fingerprint + live versions) onto context. Never blocks - a client-less or failing DO call just falls back to the fallback profile/versions. */
+/**
+ * Resolve the read-only fallback identity (fingerprint + live versions) onto
+ * context, keyed by the token's hash - never `kind` (see `IdentityKey`'s
+ * module doc: the same physical token configured into both static slots
+ * must resolve to the exact same fingerprint *session*, even though its
+ * fingerprint *profile* may be assigned per kind). Returns the identity's
+ * current circuit block, if any - never blocks by itself; the caller
+ * decides whether that block actually matters for this request. A client-
+ * less or failing DO call just falls back to the fallback profile/versions
+ * with no block.
+ */
 async function resolveStaticIdentity(
   c: { var: DiscordContextVariables; set: (key: 'clientVersions' | 'identity', value: unknown) => void },
   client: TokenPoolClient | undefined,
-): Promise<void> {
+): Promise<IdentityBlock | null> {
   const kind = c.var.discordTokenKind as StaticTokenKind;
-  const prepared = client?.prepareStatic ? await safePrepareStatic(client.prepareStatic, kind) : null;
+  const identityHash = await hashToken(c.var.discordToken);
+  const prepared = client?.prepareStatic ? await safePrepareStatic(client.prepareStatic, identityHash, kind) : null;
 
   const versions = resolveClientVersions(prepared?.versions ?? null, Date.now());
   c.set('clientVersions', versions);
@@ -116,22 +138,25 @@ async function resolveStaticIdentity(
       : resolveProfileId(fingerprint?.profileId, versions.chromeMajor);
 
   c.set('identity', {
-    key: `static:${kind}`,
+    key: `static:${identityHash}`,
     kind: 'static',
     staticKind: kind,
     profile,
   });
+
+  return prepared?.block ?? null;
 }
 
-/** Best-effort: a DO RPC failure here must never block the static path (it has no eligibility check to fail anyway) - fall back to the fallback profile/versions. */
+/** Best-effort: a DO RPC failure here must never block the static path (falling back to no block is safe - the real gate is `leaseStatic` at the point of use anyway) - fall back to the fallback profile/versions. */
 async function safePrepareStatic(
   prepareStatic: NonNullable<TokenPoolClient['prepareStatic']>,
+  identityHash: string,
   kind: StaticTokenKind,
 ): Promise<StaticPrepareResult> {
   try {
-    return await prepareStatic(kind);
+    return await prepareStatic(identityHash, kind);
   } catch (err: unknown) {
     console.error('prepareStatic failed:', err);
-    return { fingerprint: null, versions: { build: null, chrome: null } };
+    return { fingerprint: null, versions: { build: null, chrome: null }, block: null };
   }
 }

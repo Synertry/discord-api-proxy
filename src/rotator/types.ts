@@ -19,15 +19,16 @@
  * since those bypass the pool entirely but still need the same rate-limit and
  * captcha/Cloudflare backpressure.
  *
- * Static-guard state is keyed by the token's SHA-256 hash (`tokenHash`,
+ * Static-guard state (and, per `IdentityKey`, the fingerprint *session*
+ * derived from it) is keyed by the token's SHA-256 hash (`identityHash`,
  * computed in the Worker via `hashToken` in `token-hash.ts`, never the raw
  * secret), not by `StaticTokenKind`: `DISCORD_TOKEN_USER` and
  * `DISCORD_TOKEN_USER_PREMIUM` may be the same underlying token, and keying
  * by kind alone would let one physical token accumulate two independent
- * budgets/circuits - effectively doubling its own rate-limit resistance.
- * Fingerprint *profile* assignment stays kind-keyed (`static-fingerprint:${kind}`):
- * that's an operator-UX choice ("what does the default slot look like"),
- * orthogonal to the physical token's abuse budget.
+ * budgets/circuits, and present two different concurrent client sessions to
+ * Discord. Fingerprint *profile* assignment alone stays kind-keyed
+ * (`static-fingerprint:${kind}`): that's an operator-UX choice ("what does
+ * the default slot look like"), orthogonal to both the budget and session.
  */
 
 import type { CustomProfile, ResolvedProfile } from '../fingerprint/profiles';
@@ -45,8 +46,24 @@ export type Slot = 'default' | 'premium';
  */
 export type StaticTokenKind = 'user-default' | 'user-premium';
 
-/** Every identity a fingerprint/session is derived for: a static token kind, or a pool token label. Kind-keyed for static (operator UX); see the module doc for why the *guard* uses a token hash instead. */
-export type IdentityKey = `static:${StaticTokenKind}` | `pool:${string}`;
+/**
+ * Every identity a fingerprint/session is derived for: a pool token label,
+ * or - for static tokens - the SAME SHA-256 hash the guard is keyed by
+ * (`hashToken` in `token-hash.ts`), never the `StaticTokenKind`. Using the
+ * hash here too (not just for the guard) is what makes the dual-slot
+ * collision fix complete: if `DISCORD_TOKEN_USER` and
+ * `DISCORD_TOKEN_USER_PREMIUM` are the same physical token, keying the
+ * *session* (`client_launch_id`/`client_heartbeat_session_id`/
+ * `launch_signature`, derived from this key in `session.ts`) by kind would
+ * still present Discord with two different concurrent client sessions for
+ * one token even though its rate-limit budget is correctly shared - exactly
+ * the "multiple simultaneous identities on one account" pattern this
+ * subsystem exists to prevent. Fingerprint *profile* assignment alone stays
+ * kind-keyed (`static-fingerprint:${kind}`, an operator-UX choice for which
+ * template/clone a slot presents), orthogonal to both the budget and the
+ * session identity.
+ */
+export type IdentityKey = `static:${string}` | `pool:${string}`;
 
 /**
  * Per-kind static fingerprint mapping (operator-set via /admin/static-fingerprint).
@@ -160,13 +177,14 @@ export interface PendingStaticLease {
 }
 
 /**
- * Guard state for one static-token identity, keyed by `tokenHash` (see the
- * module doc). Persisted under storage key `static-guard:${tokenHash}`,
- * created lazily (empty budget) on first `leaseStatic` call for a hash that
- * has never been seen (`prepareStatic` is read-only and never creates one).
+ * Guard state for one static-token identity, keyed by `identityHash` (see
+ * `IdentityKey`'s module doc). Persisted under storage key
+ * `static-guard:${identityHash}`, created lazily (empty budget) on first
+ * `leaseStatic` call for a hash that has never been seen (`prepareStatic` is
+ * read-only and never creates one).
  */
 export interface StaticIdentityState extends BucketBudget {
-  tokenHash: string;
+  identityHash: string;
   lastSeenAt: number;
   /**
    * Leases issued by `leaseStatic` and not yet settled. `settleStatic`
@@ -273,10 +291,11 @@ export interface IdentityBlock {
   signal?: AbuseSignal;
 }
 
-/** Result of `prepareStatic`: a read-only peek at the identity's fingerprint + live versions. No eligibility check, no mutation, no `routeKey` - safe to call from middleware on every request without leasing anything. */
+/** Result of `prepareStatic`: a read-only peek at the identity's fingerprint + live versions, plus a circuit-only `block` when the DO-wide upstream circuit or this identity's own captcha circuit is currently open (no bucket/dispatch-gap check - that only happens at `leaseStatic` time). Never mutates, never creates a guard record. */
 export interface StaticPrepareResult {
   fingerprint: StaticFingerprintRecord | null;
   versions: ClientVersionRecords;
+  block: IdentityBlock | null;
 }
 
 /** Result of `leaseStatic`: either a reservation (carrying a `requestId` for `settleStatic`'s idempotency, matching the pool's acquire/release pattern) or a block. */
@@ -344,21 +363,27 @@ export interface TokenPoolClient {
   acquireByLabel?(label: string, slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
   release(label: string, requestId: string, response: ReleaseInput): Promise<void>;
   /**
-   * Read-only identity peek: fingerprint + live versions for `kind`, no
-   * eligibility check, no `routeKey`, no lease. Called once per request by
-   * the identity middleware to build the response identity/headers context.
-   * The actual budget lease happens at the point of each outbound fetch via
-   * `leaseStatic`, never here - see the module doc on `do.ts` for why.
+   * Read-only identity peek: fingerprint for `kind` (kind-keyed, operator UX)
+   * plus live versions (DO-wide) plus a circuit-only `block` for
+   * `identityHash` (see `IdentityKey`'s module doc for why the guard, and
+   * therefore this hash, is never kind-keyed). No bucket/dispatch-gap check,
+   * no `routeKey`, no lease. Called once per request by the identity
+   * middleware to build the response identity/headers context and to let it
+   * short-circuit an already-blocked identity before ever touching
+   * downstream middleware - the actual budget lease still only happens at
+   * the point of each outbound fetch via `leaseStatic`, never here.
    */
-  prepareStatic?(kind: StaticTokenKind): Promise<StaticPrepareResult>;
+  prepareStatic?(identityHash: string, kind: StaticTokenKind): Promise<StaticPrepareResult>;
   /**
    * Reserve the budget for one outbound fetch on `routeKey`, immediately
-   * before dispatching it. `tokenHash` is the SHA-256 hex of the static
-   * token, computed by the caller (see `token-hash.ts`); `kind` selects the
-   * fingerprint-profile lookup only, never the guard's storage key.
+   * before dispatching it. `identityHash` (see `token-hash.ts`) is the ONLY
+   * identity-scoping argument - never `kind`: two static kinds may be the
+   * same underlying token, and kind alone would let it accumulate two
+   * independent budgets. `kind` plays no role in the guard at all, not even
+   * for logging - see `do.ts` for the truncated-hash log convention instead.
    */
-  leaseStatic?(kind: StaticTokenKind, tokenHash: string, routeKey: RouteKey): Promise<LeaseStaticResult>;
-  /** Settle a lease immediately after its fetch completes. Idempotent on `requestId`, mirroring `release`. */
-  settleStatic?(kind: StaticTokenKind, tokenHash: string, requestId: string, outcome: ReleaseInput): Promise<void>;
+  leaseStatic?(identityHash: string, routeKey: RouteKey): Promise<LeaseStaticResult>;
+  /** Settle a lease immediately after its fetch completes. Idempotent on `requestId`, mirroring `release`. Same `identityHash`-only rule as `leaseStatic`. */
+  settleStatic?(identityHash: string, requestId: string, outcome: ReleaseInput): Promise<void>;
   getClientVersions?(): Promise<ClientVersionRecords>;
 }

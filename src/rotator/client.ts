@@ -70,14 +70,14 @@ export function createTokenPoolClient(stub: DurableObjectStub): TokenPoolClient 
     release(label: string, requestId: string, response: ReleaseInput): Promise<void> {
       return rpc.release(label, requestId, response);
     },
-    prepareStatic(kind: StaticTokenKind): Promise<StaticPrepareResult> {
-      return rpc.prepareStatic(kind);
+    prepareStatic(identityHash: string, kind: StaticTokenKind): Promise<StaticPrepareResult> {
+      return rpc.prepareStatic(identityHash, kind);
     },
-    leaseStatic(kind: StaticTokenKind, tokenHash: string, routeKey: RouteKey): Promise<LeaseStaticResult> {
-      return rpc.leaseStatic(kind, tokenHash, routeKey);
+    leaseStatic(identityHash: string, routeKey: RouteKey): Promise<LeaseStaticResult> {
+      return rpc.leaseStatic(identityHash, routeKey);
     },
-    settleStatic(kind: StaticTokenKind, tokenHash: string, requestId: string, outcome: ReleaseInput): Promise<void> {
-      return rpc.settleStatic(kind, tokenHash, requestId, outcome);
+    settleStatic(identityHash: string, requestId: string, outcome: ReleaseInput): Promise<void> {
+      return rpc.settleStatic(identityHash, requestId, outcome);
     },
     getClientVersions(): Promise<ClientVersionRecords> {
       return rpc.getClientVersions();
@@ -94,8 +94,8 @@ interface RpcShape {
   acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
   acquireByLabel(label: string, slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
   release(label: string, requestId: string, response: ReleaseInput): Promise<void>;
-  prepareStatic(kind: StaticTokenKind): Promise<StaticPrepareResult>;
-  leaseStatic(kind: StaticTokenKind, tokenHash: string, routeKey: RouteKey): Promise<LeaseStaticResult>;
-  settleStatic(kind: StaticTokenKind, tokenHash: string, requestId: string, outcome: ReleaseInput): Promise<void>;
+  prepareStatic(identityHash: string, kind: StaticTokenKind): Promise<StaticPrepareResult>;
+  leaseStatic(identityHash: string, routeKey: RouteKey): Promise<LeaseStaticResult>;
+  settleStatic(identityHash: string, requestId: string, outcome: ReleaseInput): Promise<void>;
   getClientVersions(): Promise<ClientVersionRecords>;
 }
