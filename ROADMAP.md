@@ -17,6 +17,20 @@ Multi-token Discord user-token rotator landed in PR #47. v1 covers the proxy, bi
 - [ ] **Reaction-emoji route inclusion in the rotation allowlist.** v1 keeps `PUT|DELETE /channels/:id/messages/:id/reactions/:emoji/@me` on static tokens because they are authorship endpoints. If a read-only reaction-fetch use case shows up (`GET /channels/:id/messages/:id/reactions/:emoji`), add it to `isRotatableRoute`.
 - [ ] **Server-side `tokenSecret` uniqueness check.** `TokenPoolDO.register()` keys by `label` only, so the same token registered under two different labels currently succeeds and wastes rotation (both entries share Discord's per-token-per-bucket budget). A cheap O(N) hash-compare at register-time would close it. Pool cap is 20, so the scan is trivial.
 
+
+## Client identity hardening (post-feat/client-identity)
+
+Realistic per-identity fingerprinting, header allowlisting, and an identity guard for static user tokens landed to close the gap where static `DISCORD_TOKEN_USER`/`_PREMIUM` requests bypassed the pool's rate-limit and abuse-signal protections entirely. See README's Client Identity section for the shipped design.
+
+### Accepted gaps (not emulable from a Cloudflare Worker, or deliberately out of scope)
+
+- [ ] **TLS JA3/JA4 fingerprinting.** Workers don't expose raw TLS ClientHello construction; a real client's TLS fingerprint can't be reproduced short of a `curl_cffi`-style shim, which has no Workers equivalent.
+- [ ] **HTTP/2 frame ordering.** Same category as TLS fingerprinting; the runtime owns the transport, not the request code.
+- [ ] **Worker egress IP.** Requests originate from Cloudflare's own IP ranges regardless of fingerprint realism. Orthogonal to the token rotator's existing per-token-per-bucket mitigation (see above).
+- [ ] **`CF-Worker` / `CF-Connecting-IP` on cross-zone subrequests.** Cloudflare platform behavior on Worker-to-Worker-zone requests; not something request code can suppress.
+- [ ] **Custom-endpoint (`/custom/*`) inner-bucket pre-check.** Only identity-wide state (abuse circuits, global cooldown) is pre-checked before a custom endpoint's own fan-out of sub-requests; individual buckets are recorded as each sub-request settles but not pre-checked before it dispatches. Revisit if a custom endpoint's fan-out width grows enough to make an avoidable 429 costly.
+- [ ] **Per-request grease rotation.** `Sec-CH-UA`'s greased brand is fixed per Chrome major (matching a real client's per-launch, not per-request, grease selection) rather than rotated every call. Matches real client behavior; not a gap unless a specific detection vector is found.
+
 ## Cross-cutting tech debt (out of scope for the rotator)
 
 These predate the rotator and are tracked separately. Listed here so they don't fall off the radar.
