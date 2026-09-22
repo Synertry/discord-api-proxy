@@ -143,20 +143,20 @@ export function createBingoDiscordClient(args: {
     const versions = await getVersions();
 
     let response: Response;
+    let outcome: Awaited<ReturnType<typeof inspectResponse>>;
     try {
       response = await fetcher(url, {
         method: 'GET',
         headers: await buildHeaders(acq, versions),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
+      outcome = await inspectResponse(response, routeKey, guildId);
+      await pool.release(acq.label, acq.requestId, outcome);
     } catch (err: unknown) {
-      await pool.release(acq.label, acq.requestId, { status: 599, routeKey });
+      await pool.release(acq.label, acq.requestId, { status: 599, routeKey }).catch(() => undefined);
       const message = err instanceof Error ? err.message : String(err);
       throw new DiscordApiError(0, `Network error: ${message}`);
     }
-
-    const outcome = await inspectResponse(response, routeKey, guildId);
-    await pool.release(acq.label, acq.requestId, outcome);
 
     if (response.status !== 429) return response;
 
@@ -165,18 +165,20 @@ export function createBingoDiscordClient(args: {
     const retry = await pool.acquire('default', routeKey, guildId);
     if (!retry.ok) return response;
 
-    const retryResponse = await fetcher(url, {
-      method: 'GET',
-      headers: await buildHeaders(retry, versions),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    }).catch((err: unknown) => {
+    try {
+      const retryResponse = await fetcher(url, {
+        method: 'GET',
+        headers: await buildHeaders(retry, versions),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      const retryOutcome = await inspectResponse(retryResponse, routeKey, guildId);
+      await pool.release(retry.label, retry.requestId, retryOutcome);
+      return retryResponse;
+    } catch (err: unknown) {
+      await pool.release(retry.label, retry.requestId, { status: 599, routeKey }).catch(() => undefined);
       const message = err instanceof Error ? err.message : String(err);
       throw new DiscordApiError(0, `Network error on retry: ${message}`);
-    });
-
-    const retryOutcome = await inspectResponse(retryResponse, routeKey, guildId);
-    await pool.release(retry.label, retry.requestId, retryOutcome);
-    return retryResponse;
+    }
   }
 
   async function getJson(pathname: string, query: URLSearchParams | undefined): Promise<{ response: Response; body: unknown }> {

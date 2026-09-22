@@ -291,6 +291,28 @@ describe('Proxy Route (message-send body fill and opt-in typing)', () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(callUrl(mockFetch, 0)).toContain('/messages');
   });
+
+  it('recomputes Content-Length after filling nonce/tts/flags grows the body', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: '1' }));
+    const app = createApp(mockFetch as unknown as typeof fetch);
+    const originalBody = JSON.stringify({ content: 'hi' });
+    const req = new Request(messagesUrl(), {
+      method: 'POST',
+      headers: {
+        'x-auth-key': 'secret-key',
+        'x-proxy-context': 'user',
+        'content-type': 'application/json',
+        'content-length': String(originalBody.length),
+      },
+      body: originalBody,
+    });
+    await app.request(req, undefined, MOCK_ENV);
+    const init = callInit(mockFetch);
+    const sentBody = init.body as string;
+    const declaredLength = Number(callHeaders(mockFetch).get('Content-Length'));
+    expect(sentBody.length).toBeGreaterThan(originalBody.length); // filled body grew past the original
+    expect(declaredLength).toBe(new TextEncoder().encode(sentBody).byteLength);
+  });
 });
 
 describe('Proxy Route (pool acquire, auto selector)', () => {
@@ -414,6 +436,36 @@ describe('Proxy Route (pool acquire, auto selector)', () => {
     expect(waitedMs[0]).toBeGreaterThanOrEqual(1000);
     expect(release).toHaveBeenCalledWith('tok-1', 'req-1', expect.objectContaining({ status: 429 }));
     expect(release).toHaveBeenCalledWith('tok-2', 'req-2', expect.objectContaining({ status: 200 }));
+  });
+
+  it('releases the retry token when the retry dispatch itself throws (no lease leak)', async () => {
+    let acquireCalls = 0;
+    const acquire = vi.fn(async (): Promise<AcquireResult> => {
+      acquireCalls += 1;
+      return {
+        ok: true,
+        label: `tok-${acquireCalls}`,
+        tokenSecret: `SECRET_${acquireCalls}`,
+        requestId: `req-${acquireCalls}`,
+        fingerprintProfileId: 'chrome-win-de',
+      };
+    });
+    const release = vi.fn(async () => undefined);
+    const client: TokenPoolClient = { acquire, release };
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      if (acquireCalls === 1) return new Response('Rate limited', { status: 429, headers: { 'Retry-After': '1' } });
+      throw new Error('network down on retry');
+    });
+    const app = createApp(mockFetch as unknown as typeof fetch, client, async () => undefined);
+    const res = await app.request(
+      new Request('http://localhost/guilds/219564597349318656/messages/search', { headers: { 'x-auth-key': 'secret-key' } }),
+      undefined,
+      MOCK_ENV,
+    );
+    expect(res.status).toBe(500);
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(release).toHaveBeenCalledWith('tok-1', 'req-1', expect.objectContaining({ status: 429 }));
+    expect(release).toHaveBeenCalledWith('tok-2', 'req-2', expect.objectContaining({ status: 599 }));
   });
 });
 

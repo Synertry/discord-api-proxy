@@ -106,7 +106,8 @@ export async function fetchAllMessages<T extends PagedMessage>(opts: PagerOption
     const batch = await fetchOnePage<T>(url, opts, wait);
 
     if (batch.length === 0) break;
-    allMessages.push(...batch);
+    const remaining = opts.maxMessages - allMessages.length;
+    allMessages.push(...(batch.length > remaining ? batch.slice(0, remaining) : batch));
 
     // Incomplete batch means we've reached the oldest message.
     if (batch.length < opts.pageLimit) break;

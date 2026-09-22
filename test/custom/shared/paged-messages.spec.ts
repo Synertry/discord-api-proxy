@@ -118,6 +118,19 @@ describe('fetchAllMessages: basic pagination', () => {
     expect(result).toHaveLength(5000);
   });
 
+  it('trims the final batch instead of overshooting a non-multiple maxMessages cap', async () => {
+    // pageLimit=100 divides maxMessages=150 unevenly: page 1 is a full 100-message
+    // batch, page 2 would also be a full batch. Without trimming, both full
+    // batches get pushed unconditionally and the result overshoots to 200.
+    const pages = [generateMessages(100, 3000), generateMessages(100, 2900)];
+    const mockFetch = createMockFetch(pages);
+    const result = await fetchAllMessages<TestMessage>(
+      baseOpts({ fetcher: mockFetch as unknown as typeof fetch, maxMessages: 150, pageLimit: 100 }),
+    );
+    expect(result).toHaveLength(150);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
   it('every outbound fetch carries an AbortSignal', async () => {
     const mockFetch = createMockFetch([[]]);
     await fetchAllMessages<TestMessage>(baseOpts({ fetcher: mockFetch as unknown as typeof fetch }));

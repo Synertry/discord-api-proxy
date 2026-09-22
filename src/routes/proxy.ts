@@ -177,24 +177,33 @@ proxyRoute.all('/*', async (c) => {
     }
 
     const headers = await composeRequestHeaders({ token, tokenKind: kind, identity, versions, inbound: c.req.raw.headers });
+    if (typeof bodyInit === 'string') {
+      // fillMessageBody rewrote the body (nonce/tts/flags fill) - the inbound
+      // Content-Length forwarded above by composeRequestHeaders no longer
+      // matches the actual byte length; recompute it.
+      headers.set('Content-Length', String(new TextEncoder().encode(bodyInit).byteLength));
+    }
     if (routeKey === MESSAGE_SEND_ROUTE && !headers.has('X-Context-Properties')) {
       const contextProperties = contextPropertiesFor(routeKey);
       if (contextProperties) headers.set('X-Context-Properties', contextProperties);
     }
 
     let mainSettled = false;
+    let poolReleased = false;
     try {
       const response = await dispatch(fetcher, discordUrl, method, headers, bodyInit);
       const outcome = await inspectResponse(response, routeKey, guildId);
 
       if (usingPool && client && poolLease) {
         await client.release(poolLease.label, poolLease.requestId, outcome);
+        poolReleased = true;
         if (response.status === 429 && plan) {
           return await retryPool({
             c,
             client,
             plan,
             versions,
+            kind,
             method,
             headers: c.req.raw.headers,
             discordUrl,
@@ -214,7 +223,7 @@ proxyRoute.all('/*', async (c) => {
       if (guard && mainLease && !mainSettled) {
         await guard.settle(mainLease.requestId, { status: 599, routeKey }).catch(() => undefined);
       }
-      if (usingPool && client && poolLease) {
+      if (usingPool && client && poolLease && !poolReleased) {
         await client.release(poolLease.label, poolLease.requestId, { status: 599, routeKey }).catch(() => undefined);
       }
       throw err;
@@ -403,6 +412,7 @@ async function retryPool(args: {
   client: TokenPoolClient;
   plan: PoolPlan;
   versions: ClientVersions;
+  kind: DiscordTokenKind;
   method: string;
   headers: Headers;
   discordUrl: string;
@@ -420,7 +430,7 @@ async function retryPool(args: {
   const retryIdentity = poolIdentity(retry, args.versions);
   const retryHeaders = await composeRequestHeaders({
     token: retry.tokenSecret,
-    tokenKind: 'user-default',
+    tokenKind: args.kind,
     identity: retryIdentity,
     versions: args.versions,
     inbound: args.headers,
@@ -430,8 +440,13 @@ async function retryPool(args: {
     if (contextProperties) retryHeaders.set('X-Context-Properties', contextProperties);
   }
 
-  const retryResponse = await dispatch(args.fetcher, args.discordUrl, args.method, retryHeaders, undefined);
-  const retryOutcome = await inspectResponse(retryResponse, args.plan.routeKey, args.plan.guildId);
-  await args.client.release(retry.label, retry.requestId, retryOutcome);
-  return retryResponse;
+  try {
+    const retryResponse = await dispatch(args.fetcher, args.discordUrl, args.method, retryHeaders, undefined);
+    const retryOutcome = await inspectResponse(retryResponse, args.plan.routeKey, args.plan.guildId);
+    await args.client.release(retry.label, retry.requestId, retryOutcome);
+    return retryResponse;
+  } catch (err: unknown) {
+    await args.client.release(retry.label, retry.requestId, { status: 599, routeKey: args.plan.routeKey }).catch(() => undefined);
+    throw err;
+  }
 }
