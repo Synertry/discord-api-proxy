@@ -13,6 +13,10 @@
 # deploy (which fast-forwards many merged PRs) into a readable changelog
 # instead of just the single head commit title.
 #
+# Delivery: when RELAY_AUTH_KEY + RELAY_DOMAIN are set the embed is dogfeeded
+# through cf-discord-relay first and only falls back to the direct Discord
+# webhook on failure; with those secrets unset it posts straight to the webhook.
+#
 # Discord embed character limits (documented at
 # https://discord.com/developers/docs/resources/message#embed-object-embed-limits):
 #   title          <= 256
@@ -59,7 +63,13 @@ on:
     secrets:
       DISCORD_WEBHOOK_URL:
         required: true
-        description: 'Discord webhook URL receiving the embed'
+        description: 'Direct Discord webhook URL. Used as the fallback if relay secrets are unset or the relay call fails.'
+      RELAY_AUTH_KEY:
+        required: false
+        description: 'cf-discord-relay shared secret. When set together with RELAY_DOMAIN, the deploy embed is dogfeeded through the relay first and only falls back to the direct Discord URL on failure.'
+      RELAY_DOMAIN:
+        required: false
+        description: 'cf-discord-relay host (e.g. relay.example.com). When set together with RELAY_AUTH_KEY, dogfeeds the deploy embed through the relay.'
 
 # Compare API (repos/{repo}/compare) needs read access to repository contents.
 permissions:
@@ -86,6 +96,8 @@ jobs:
           # GITHUB_TOKEN of this reusable workflow; used by `gh api` for the compare call.
           GH_TOKEN: ${{ github.token }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RELAY_AUTH_KEY: ${{ secrets.RELAY_AUTH_KEY }}
+          RELAY_DOMAIN: ${{ secrets.RELAY_DOMAIN }}
         run: |
           set -euo pipefail
 
@@ -232,6 +244,37 @@ jobs:
                 }
               }]
             }' > payload.json
+
+          # Dogfeed path: try the relay first when RELAY_AUTH_KEY + RELAY_DOMAIN
+          # are configured. Relay URLs contain the webhook token in the path, so
+          # we capture status only and never echo URL / response body to keep
+          # logs clean.
+          if [ -n "${RELAY_AUTH_KEY:-}" ] && [ -n "${RELAY_DOMAIN:-}" ]; then
+            # Discord URL shape: https://discord.com/api/webhooks/{id}/{token}.
+            # Strip the host prefix to get the relay-equivalent path.
+            WEBHOOK_PATH="${DISCORD_WEBHOOK_URL#*api/}"
+            RELAY_URL="https://${RELAY_DOMAIN}/${WEBHOOK_PATH}"
+
+            # Avoid `|| echo "000"`: curl's own -w already prints "000" on a
+            # transport failure, so that pattern doubles up under set -e.
+            if HTTP_STATUS=$(curl --silent --max-time 15 \
+                              -o /dev/null -w '%{http_code}' \
+                              -H "Content-Type: application/json" \
+                              -H "x-auth-key: ${RELAY_AUTH_KEY}" \
+                              -d @payload.json \
+                              "${RELAY_URL}"); then
+              :
+            else
+              HTTP_STATUS="000"
+            fi
+
+            if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+              echo "Posted via cf-discord-relay (HTTP ${HTTP_STATUS})."
+              exit 0
+            fi
+
+            echo "Relay returned HTTP ${HTTP_STATUS}; falling back to direct Discord webhook."
+          fi
 
           # Fail the notify job if Discord rejects the webhook (4xx/5xx), so
           # observability gaps surface in the Actions UI instead of silently
