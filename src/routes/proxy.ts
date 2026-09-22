@@ -46,8 +46,7 @@ import { composeRequestHeaders } from '../fingerprint/headers';
 import { contextPropertiesFor } from '../fingerprint/context-properties';
 import { resolveProfileId } from '../fingerprint/profiles';
 import { resolveClientVersions } from '../fingerprint/versions';
-import { hashToken } from '../rotator/token-hash';
-import { createStaticGuard, blockResponse } from '../rotator/static-guard';
+import { blockResponse } from '../rotator/static-guard';
 import type { StaticGuard } from '../rotator/static-guard';
 import { inspectResponse } from '../rotator/signals';
 import { retryDelayMs } from '../rotator/budget';
@@ -62,12 +61,13 @@ export const proxyRoute = new OpenAPIHono<{
   Variables: DiscordContextVariables & AuthVariables & RotatorVariablesLocal;
 }>();
 
-/** Local alias: this file only reads `identity`/`clientVersions`/`poolPlan`/`tokenPoolClient`, never sets them. */
+/** Local alias: this file only reads `identity`/`clientVersions`/`poolPlan`/`tokenPoolClient`/`staticGuard`, never sets them. */
 type RotatorVariablesLocal = {
   identity?: RequestIdentity;
   clientVersions?: ClientVersions;
   poolPlan?: PoolPlan;
   tokenPoolClient?: TokenPoolClient;
+  staticGuard?: StaticGuard;
 };
 
 const DISCORD_API_BASE = 'https://discord.com/api/v10';
@@ -157,8 +157,7 @@ proxyRoute.all('/*', async (c) => {
     }
 
     const usingPool = poolLease !== undefined;
-    const identityHash = usingPool ? undefined : await hashToken(token);
-    const guard: StaticGuard | undefined = !usingPool && client && identityHash ? createStaticGuard(client, identityHash) : undefined;
+    const guard: StaticGuard | undefined = usingPool ? undefined : c.var.staticGuard;
 
     // ---- Typing (opt-in; only for a real, non-empty message send). ----
     let typingDispatched = false;

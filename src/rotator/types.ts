@@ -32,6 +32,7 @@
  */
 
 import type { CustomProfile, ResolvedProfile } from '../fingerprint/profiles';
+import type { StaticGuard } from './static-guard';
 import type { ClientVersionRecords, ClientVersions } from '../fingerprint/versions';
 export type { ClientVersionRecords, ClientVersions } from '../fingerprint/versions';
 
@@ -353,6 +354,14 @@ export interface RotatorVariables {
   poolPlan?: PoolPlan;
   /** Lazily-constructed client. Tests inject via createApp(_, mockTokenPool). */
   tokenPoolClient?: TokenPoolClient;
+  /**
+   * One shared static-identity guard for this request, constructed once by
+   * the identity middleware (closed over the identity's pre-computed hash)
+   * and reused by every consumer that leases at the point of use - proxy.ts
+   * and the shared paged-messages pager. Absent when the client lacks the
+   * guard RPCs (no DO binding) - static path stays unguarded, never errors.
+   */
+  staticGuard?: StaticGuard;
 }
 
 /**

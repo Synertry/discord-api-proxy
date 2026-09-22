@@ -48,7 +48,7 @@ import { createTokenPoolClient, getPoolStub } from '../rotator/client';
 import { resolveClientVersions } from '../fingerprint/versions';
 import { resolveProfileId, resolveCustom } from '../fingerprint/profiles';
 import { hashToken } from '../rotator/token-hash';
-import { blockResponse } from '../rotator/static-guard';
+import { blockResponse, createStaticGuard } from '../rotator/static-guard';
 import type { IdentityBlock, RotatorVariables, Slot, StaticPrepareResult, StaticTokenKind, TokenPoolClient } from '../rotator/types';
 
 export const identityMiddleware = createMiddleware<{
@@ -121,7 +121,7 @@ export const identityMiddleware = createMiddleware<{
  * with no block.
  */
 async function resolveStaticIdentity(
-  c: { var: DiscordContextVariables; set: (key: 'clientVersions' | 'identity', value: unknown) => void },
+  c: { var: DiscordContextVariables; set: (key: 'clientVersions' | 'identity' | 'staticGuard', value: unknown) => void },
   client: TokenPoolClient | undefined,
 ): Promise<IdentityBlock | null> {
   const kind = c.var.discordTokenKind as StaticTokenKind;
@@ -143,6 +143,18 @@ async function resolveStaticIdentity(
     staticKind: kind,
     profile,
   });
+
+  // One shared StaticGuard for this request, reused by proxy.ts and every
+  // custom-route consumer (the shared paged-messages pager, etc.) instead
+  // of each independently recomputing identityHash and reconstructing the
+  // wrapper - the underlying DO state is already correctly shared via the
+  // identityHash-keyed storage key regardless, this just avoids the
+  // redundant work. Undefined when the client lacks leaseStatic/settleStatic
+  // (no DO binding) - the static path stays first-class either way.
+  if (client) {
+    const guard = createStaticGuard(client, identityHash);
+    if (guard) c.set('staticGuard', guard);
+  }
 
   return prepared?.block ?? null;
 }
