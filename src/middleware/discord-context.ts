@@ -39,6 +39,8 @@ export type DiscordContextVariables = {
   discordTokenKind: DiscordTokenKind;
   /** Optional fetch override injected during testing. */
   proxyFetch?: typeof fetch;
+  /** Optional wait/sleep override injected during testing (typing pre-send delay, 429 retry backoff). */
+  proxyWait?: (ms: number) => Promise<void>;
 };
 
 /**

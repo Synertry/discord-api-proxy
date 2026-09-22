@@ -33,7 +33,7 @@ import { customRoutes } from './routes/custom';
 import { proxyRoute } from './routes/proxy';
 import { buildAdminRoutes } from './routes/admin';
 import { buildHealthcheckRoute } from './routes/healthcheck';
-import { scheduledBuildNumberHandler } from './scheduled/build-number-refresh';
+import { scheduledClientVersionsHandler } from './scheduled/client-versions-refresh';
 
 import type { RotatorVariables, TokenPoolClient } from './rotator/types';
 
@@ -53,19 +53,21 @@ export { TokenPoolDO } from './rotator/do';
  *
  * @param mockFetch - Optional fetch override for integration tests.
  * @param mockTokenPool - Optional in-memory TokenPoolClient for tests; bypasses the real DO.
+ * @param mockWait - Optional wait/sleep override for integration tests (typing pre-send delay, 429 retry backoff).
  * @returns Configured Hono app instance.
  */
-export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolClient) {
+export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolClient, mockWait?: (ms: number) => Promise<void>) {
   const app = new OpenAPIHono<{
     Bindings: Bindings;
     Variables: DiscordContextVariables & AuthVariables & RotatorVariables;
   }>();
 
-  // Inject mock fetch and/or token-pool client for testing
-  if (mockFetch || mockTokenPool) {
+  // Inject mock fetch, token-pool client, and/or wait for testing
+  if (mockFetch || mockTokenPool || mockWait) {
     app.use('*', async (c, next) => {
       if (mockFetch) c.set('proxyFetch', mockFetch);
       if (mockTokenPool) c.set('tokenPoolClient', mockTokenPool);
+      if (mockWait) c.set('proxyWait', mockWait);
       await next();
     });
   }
@@ -83,7 +85,12 @@ export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolCli
   // Sieve Layer 1: Rate Limit Interceptor (post-processing)
   // Runs AFTER downstream handlers to intercept 429 responses
   // and reformat them into a consistent JSON envelope, preserving
-  // the original Retry-After and X-RateLimit-* headers from Discord.
+  // the original Retry-After, X-RateLimit-*, and X-Proxy-* headers -
+  // the last of these carries the identity guard's block signal
+  // (`X-Proxy-Block: bucket|capacity|captcha|cloudflare`, see
+  // `rotator/static-guard.ts`) through this reformat untouched, since a
+  // guard block is itself constructed as a 429 and passes through here
+  // exactly like a genuine Discord rate limit.
   app.use('*', async (c, next) => {
     await next();
 
@@ -91,10 +98,11 @@ export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolCli
       const original = c.res;
       const retryAfter = original.headers.get('Retry-After');
 
-      // Preserve rate-limit headers from the original response
+      // Preserve rate-limit and proxy-signal headers from the original response
       const preservedHeaders = new Headers();
       original.headers.forEach((v, k) => {
-        if (k.toLowerCase() === 'retry-after' || k.toLowerCase().startsWith('x-ratelimit-')) {
+        const lower = k.toLowerCase();
+        if (lower === 'retry-after' || lower.startsWith('x-ratelimit-') || lower.startsWith('x-proxy-')) {
           preservedHeaders.set(k, v);
         }
       });
@@ -144,11 +152,11 @@ export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolCli
   return app;
 }
 
-/** Worker entry: fetch handler + daily scheduled scraper for the Discord build_number. */
+/** Worker entry: fetch handler + daily scheduled scraper for the Discord client build number and Chrome stable major. */
 const app = createApp();
 export default {
   fetch: app.fetch.bind(app),
   scheduled: async (_event: ScheduledController, env: Bindings, _ctx: ExecutionContext): Promise<void> => {
-    await scheduledBuildNumberHandler(env);
+    await scheduledClientVersionsHandler(env);
   },
 };
