@@ -22,6 +22,10 @@ describe('isApproveCommand', () => {
 		expect(isApproveCommand('/approve\r')).toBe(true);
 	});
 
+	it('rejects a trailing non-breaking space (not stripped, unlike ordinary whitespace)', () => {
+		expect(isApproveCommand('/approve\u00a0')).toBe(false);
+	});
+
 	it('accepts /approve with trailing spaces', () => {
 		expect(isApproveCommand('/approve   ')).toBe(true);
 	});

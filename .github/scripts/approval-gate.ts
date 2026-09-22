@@ -40,7 +40,7 @@ import { pathToFileURL } from 'node:url';
  */
 export function isApproveCommand(body: string): boolean {
 	const firstNonEmpty = body.split(/\r?\n/).find((line) => line.trim().length > 0);
-	return (firstNonEmpty ?? '').trimEnd() === '/approve';
+	return (firstNonEmpty ?? '').replace(/[\r \t]+$/, '') === '/approve';
 }
 
 /** A positive decimal integer, no leading zero, up to 7 digits (GitHub PR numbers never exceed this in practice). */
