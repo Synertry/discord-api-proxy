@@ -100,3 +100,55 @@ describe('inspectResponse: cloudflare detection', () => {
     expect(input.signal).toBeUndefined();
   });
 });
+
+describe('inspectResponse: bounded body read (no Content-Length to trust)', () => {
+  /** A Response that streams `totalBytes` bytes in 8 KiB chunks, plus a counter of the bytes its consumer actually pulled. */
+  function streamedResponse(totalBytes: number, status: number, contentType: string) {
+    const chunk = new Uint8Array(8192).fill(0x78); // 'x'
+    const sent = { bytes: 0 };
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent.bytes >= totalBytes) {
+          controller.close();
+          return;
+        }
+        sent.bytes += chunk.byteLength;
+        controller.enqueue(chunk);
+      },
+    });
+    return { response: new Response(body, { status, headers: { 'Content-Type': contentType } }), sent };
+  }
+
+  it('stops reading a streamed body at the inspection ceiling and leaves the original body intact', async () => {
+    const total = 1024 * 1024;
+    const { response, sent } = streamedResponse(total, 503, 'text/html');
+
+    const input = await inspectResponse(response, ROUTE_KEY);
+
+    // Past the ceiling: no signal, even though this is an HTML body with no
+    // `via` header, which would otherwise read as a Cloudflare challenge.
+    expect(input.status).toBe(503);
+    expect(input.signal).toBeUndefined();
+    // The read stopped at the 64 KiB ceiling instead of buffering the whole
+    // megabyte before checking its size.
+    expect(sent.bytes).toBeLessThan(total / 2);
+    // ...and the caller's own body is untouched by the cancelled clone.
+    await expect(response.text()).resolves.toHaveLength(total);
+  });
+
+  it('still inspects a small streamed body, detecting a captcha signal', async () => {
+    const payload = JSON.stringify({ captcha_key: ['captcha-required'], captcha_sitekey: 'abc' });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(payload));
+        controller.close();
+      },
+    });
+    const response = new Response(body, { status: 429, headers: { 'Content-Type': 'application/json' } });
+
+    const input = await inspectResponse(response, ROUTE_KEY);
+    expect(input.signal).toBe('captcha');
+    expect(input.status).toBe(429);
+    await expect(response.text()).resolves.toBe(payload);
+  });
+});

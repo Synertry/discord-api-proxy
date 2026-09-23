@@ -22,11 +22,26 @@
  * - Literal sub-paths kept verbatim (`search`, `members`, `reactions`, `@me`,
  *   `archived`, `public`, `private`, `active`, `pins`, `bulk-delete`, `@original`)
  * - URL-encoded segments after `/reactions/` -> `:emoji`
+ * - A webhook token (`/webhooks/<id>/<token>/...`) -> `:token` in BOTH keys:
+ *   it is a credential, and route keys are persisted in Durable Object
+ *   storage and written to logs
+ *
+ * Two keys are derived from the same path:
+ * - `deriveRouteKey` - the fully normalized *route type*, used for the
+ *   rotation allowlist and every route-type decision (message-send body
+ *   fill, typing, `X-Context-Properties`).
+ * - `deriveBudgetKey` - identical, except a literal top-level resource id
+ *   (`channels`/`guilds`/`webhooks`) is preserved. Every rate-limit
+ *   budget/lease/settle call uses this one, so two top-level resources never
+ *   share one cooldown row.
  */
 
 import type { RouteKey } from './types';
 
 const SNOWFLAKE_REGEX = /^\d{17,20}$/;
+
+/** Top-level Discord resources whose literal id `deriveBudgetKey` preserves. */
+const BUDGET_ID_RESOURCES: ReadonlySet<string> = new Set(['channels', 'guilds', 'webhooks']);
 
 const ROTATABLE_LITERALS = new Set([
 	'search',
@@ -68,12 +83,66 @@ const ROTATABLE_LITERALS = new Set([
  *   // -> 'PUT:/channels/:id/messages/:id/reactions/:emoji/@me'
  */
 export function deriveRouteKey(method: string, pathname: string): RouteKey {
+	return buildRouteKey(method, pathname, false);
+}
+
+/**
+ * Budget-scoped sibling of `deriveRouteKey`, used for every rate-limit
+ * budget, lease, settle, release, acquire, and response-inspection call.
+ *
+ * Identical to `deriveRouteKey` except that when the FIRST path segment is
+ * `channels`, `guilds`, or `webhooks` and the second is a snowflake, that
+ * snowflake is kept literally. Every other segment normalizes exactly as
+ * `deriveRouteKey` does, including a webhook token, which becomes `:token`
+ * so the credential never reaches storage or logs (a webhook is scoped by
+ * its id alone).
+ *
+ * Discord's `X-RateLimit-Bucket` hash is opaque and can cover more than one
+ * top-level resource, so scoping the stored cooldown row by the literal
+ * resource (see `topLevelResource`) keeps two channels or guilds
+ * independent instead of sharing - and overwriting - one row.
+ *
+ * @example
+ * deriveBudgetKey('GET', '/channels/123456789012345678/messages/223456789012345678')
+ *   // -> 'GET:/channels/123456789012345678/messages/:id'
+ * deriveBudgetKey('GET', '/guilds/219564597349318656/messages/search')
+ *   // -> 'GET:/guilds/219564597349318656/messages/search'
+ * deriveBudgetKey('GET', '/users/@me')
+ *   // -> 'GET:/users/@me'
+ */
+export function deriveBudgetKey(method: string, pathname: string): RouteKey {
+	return buildRouteKey(method, pathname, true);
+}
+
+/**
+ * Shared normalization for both derivations. `preserveTopLevelId` keeps the
+ * first path segment's literal snowflake instead of collapsing it to `:id`,
+ * as documented on `deriveRouteKey` / `deriveBudgetKey`.
+ */
+function buildRouteKey(method: string, pathname: string, preserveTopLevelId: boolean): RouteKey {
 	const cleanPath = pathname.split('?')[0] ?? pathname;
 	const segments = cleanPath.split('/').filter(Boolean);
+
+	const top = segments[0]?.toLowerCase();
+	const hasTopLevelId = top !== undefined && BUDGET_ID_RESOURCES.has(top) && SNOWFLAKE_REGEX.test(segments[1] ?? '');
+	const preservedIdIndex = preserveTopLevelId && hasTopLevelId ? 1 : -1;
+	const webhookTokenIndex = hasTopLevelId && top === 'webhooks' ? 2 : -1;
+
 	const out: string[] = [];
 
 	for (let i = 0; i < segments.length; i++) {
 		const segment = segments[i];
+
+		if (i === webhookTokenIndex) {
+			out.push(':token');
+			continue;
+		}
+
+		if (i === preservedIdIndex) {
+			out.push(segment);
+			continue;
+		}
+
 		const prev = i > 0 ? segments[i - 1] : '';
 
 		if (prev === 'reactions') {
@@ -94,6 +163,25 @@ export function deriveRouteKey(method: string, pathname: string): RouteKey {
 	const upperMethod = method.toUpperCase();
 	const path = '/' + out.join('/');
 	return `${upperMethod}:${path}`;
+}
+
+/**
+ * The budget-scoped top-level resource of a `deriveBudgetKey` route key:
+ * `channels/<id>`, `guilds/<id>`, or `webhooks/<id>`. Returns `undefined`
+ * for every key without a literal top-level id - which is every
+ * `deriveRouteKey` key (they carry `:id`), and any path not starting with
+ * one of `BUDGET_ID_RESOURCES`.
+ */
+export function topLevelResource(routeKey: RouteKey): string | undefined {
+	const separator = routeKey.indexOf(':');
+	if (separator < 0) return undefined;
+	const segments = routeKey.slice(separator + 1).split('/').filter(Boolean);
+	const top = segments[0];
+	const id = segments[1];
+	if (top === undefined || id === undefined || !BUDGET_ID_RESOURCES.has(top) || !SNOWFLAKE_REGEX.test(id)) {
+		return undefined;
+	}
+	return `${top}/${id}`;
 }
 
 /**

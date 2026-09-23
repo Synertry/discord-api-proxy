@@ -30,6 +30,37 @@ const INSPECTABLE_STATUSES: Readonly<Record<number, true>> = { 400: true, 403: t
 const MAX_INSPECTABLE_BYTES = 65536;
 
 /**
+ * Read at most `cap` bytes from `body` as UTF-8 text, returning `null` the
+ * moment the stream turns out to carry more than `cap` bytes: the caller must
+ * then treat the body as uninspectable instead of buffering it. Reading stops
+ * there and this branch is cancelled - callers pass a `Response.clone()`
+ * branch, which is a tee, so the response the caller still holds is untouched
+ * either way.
+ */
+async function readCappedText(body: ReadableStream<Uint8Array> | null, cap: number): Promise<string | null> {
+  if (!body) return '';
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  let readBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return text + decoder.decode();
+      if (!value) continue;
+      readBytes += value.byteLength;
+      if (readBytes > cap) {
+        await reader.cancel();
+        return null;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/**
  * Build a `ReleaseInput` from a Discord `Response`, including an
  * `inspectResponse` walk of the body on abuse-relevant statuses. Clones the
  * response first so the original body remains readable by the caller. Never
@@ -42,14 +73,14 @@ export async function inspectResponse(response: Response, routeKey: RouteKey, gu
   const contentLength = response.headers.get('content-length');
   if (contentLength !== null && Number(contentLength) > MAX_INSPECTABLE_BYTES) return base;
 
-  let text: string;
+  let text: string | null;
   try {
-    const clone = response.clone();
-    text = await clone.text();
-  } catch {
+    text = await readCappedText(response.clone().body, MAX_INSPECTABLE_BYTES);
+  } catch (err: unknown) {
+    console.error('inspectResponse body read failed, skipping signal inspection:', err);
     return base;
   }
-  if (text.length === 0 || text.length > MAX_INSPECTABLE_BYTES) return base;
+  if (text === null || text.length === 0) return base;
 
   try {
     const body = JSON.parse(text) as { code?: number; captcha_key?: unknown; captcha_sitekey?: unknown };

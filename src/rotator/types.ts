@@ -90,7 +90,7 @@ export interface IdentityCircuit {
 /** Value of Discord's `X-RateLimit-Bucket` response header (an opaque hash). */
 export type DiscordBucketHash = string;
 
-/** Our derived `${METHOD}:${normalizedPath}` form. Used as a lookup key into routeToBucket. */
+/** Our derived `${METHOD}:${normalizedPath}` form - either a fully normalized route-type key or a budget key carrying a literal top-level resource id (`deriveRouteKey` / `deriveBudgetKey` in `bucket.ts`). Used as a lookup key into routeToBucket. */
 export type RouteKey = string;
 
 /** Per-bucket cooldown state. */
@@ -113,8 +113,16 @@ export interface IneligibleGuild {
  * operate purely on this shape.
  */
 export interface BucketBudget {
+  /**
+   * Cooldown rows. Each key is the route's Discord `X-RateLimit-Bucket`
+   * hash, scoped by the route's literal top-level resource
+   * (`${hash}@${topLevelResource(routeKey)}`, e.g. `abc123@channels/456`) when
+   * the key carries one, else the bare hash - so two channels, guilds, or
+   * webhooks Discord reports under one hash never share (or overwrite) one
+   * row. `routeToBucket` resolves a route key to its row.
+   */
   bucketStates: Record<DiscordBucketHash, BucketState>;
-  /** Learned from response `X-RateLimit-Bucket` headers per route. */
+  /** Learned from response `X-RateLimit-Bucket` headers: route key -> its `bucketStates` row key. */
   routeToBucket: Record<RouteKey, DiscordBucketHash>;
   /** 0 unless a global 429 benched the whole identity. */
   globalCooldownUntil: number;
@@ -331,6 +339,12 @@ export interface PoolPlan {
   slot: Slot;
   /** `'auto'` for LRU selection, or a specific label to pin via `acquireByLabel`. */
   selector: 'auto' | { label: string };
+  /**
+   * The budget key (`deriveBudgetKey`), derived from the same request path
+   * `proxy.ts` uses, so every release/cleanup/retry sends back exactly the
+   * key the acquire was granted under. The rotation allowlist and the
+   * route-type decisions keep using the normalized `deriveRouteKey` instead.
+   */
   routeKey: RouteKey;
   guildId?: string;
 }

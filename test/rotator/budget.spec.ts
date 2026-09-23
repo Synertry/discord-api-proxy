@@ -360,6 +360,82 @@ describe('applyOutcome', () => {
     expect(result.bucketStates.b1).toEqual({ remaining: 3, resetAt: NOW + 1000 });
   });
 
+  describe('bucket scoping per top-level resource', () => {
+    const CHANNEL_A = 'GET:/channels/111111111111111111/messages';
+    const CHANNEL_B = 'GET:/channels/222222222222222222/messages';
+
+    it('keeps two channels that share one Discord bucket hash independent', () => {
+      // B learns the shared hash first, then A reports the same hash
+      // exhausted: A's row must not take B down with it...
+      let budget = applyOutcome(
+        emptyBudget(),
+        null,
+        { status: 200, routeKey: CHANNEL_B, discordBucketHash: 'shared', remaining: 5, resetAfterMs: 1000 },
+        NOW,
+      );
+      budget = applyOutcome(
+        budget,
+        null,
+        { status: 200, routeKey: CHANNEL_A, discordBucketHash: 'shared', remaining: 0, resetAfterMs: 5000 },
+        NOW,
+      );
+
+      expect(evaluateBudget(budget, CHANNEL_A, NOW)).toEqual({ ok: false, reason: 'cooldown', retryAfter: 5000 });
+      expect(evaluateBudget(budget, CHANNEL_B, NOW)).toEqual({ ok: true });
+
+      // ...and A's exhausted row survives B's next response.
+      budget = applyOutcome(
+        budget,
+        null,
+        { status: 200, routeKey: CHANNEL_B, discordBucketHash: 'shared', remaining: 5, resetAfterMs: 1000 },
+        NOW,
+      );
+
+      expect(evaluateBudget(budget, CHANNEL_A, NOW)).toEqual({ ok: false, reason: 'cooldown', retryAfter: 5000 });
+      expect(evaluateBudget(budget, CHANNEL_B, NOW)).toEqual({ ok: true });
+    });
+
+    it('scopes two webhooks that share one Discord bucket hash by webhook id', () => {
+      const webhookA = 'POST:/webhooks/123456789012345678/:token/messages';
+      const webhookB = 'POST:/webhooks/223456789012345678/:token/messages';
+      let budget = applyOutcome(
+        emptyBudget(),
+        null,
+        { status: 200, routeKey: webhookB, discordBucketHash: 'shared', remaining: 5, resetAfterMs: 1000 },
+        NOW,
+      );
+      budget = applyOutcome(
+        budget,
+        null,
+        { status: 200, routeKey: webhookA, discordBucketHash: 'shared', remaining: 0, resetAfterMs: 5000 },
+        NOW,
+      );
+
+      expect(evaluateBudget(budget, webhookA, NOW)).toEqual({ ok: false, reason: 'cooldown', retryAfter: 5000 });
+      expect(evaluateBudget(budget, webhookB, NOW)).toEqual({ ok: true });
+    });
+
+    it('still lets normalized route keys with no literal top-level id share one row', () => {
+      const search = 'GET:/guilds/:id/messages/search';
+      const channels = 'GET:/guilds/:id/channels';
+      let budget = applyOutcome(
+        emptyBudget(),
+        null,
+        { status: 200, routeKey: search, discordBucketHash: 'shared', remaining: 0, resetAfterMs: 5000 },
+        NOW,
+      );
+      expect(evaluateBudget(budget, channels, NOW).ok).toBe(true);
+
+      budget = applyOutcome(
+        budget,
+        null,
+        { status: 200, routeKey: channels, discordBucketHash: 'shared', remaining: 5, resetAfterMs: 1000 },
+        NOW,
+      );
+      expect(evaluateBudget(budget, search, NOW)).toEqual({ ok: true });
+    });
+  });
+
   describe('requestId-gated settlement', () => {
     it('applies the outcome and removes the matching lease when requestId and routeKey both match', () => {
       const l = lease({ requestId: 'req-1', routeKey: 'GET:/x' });

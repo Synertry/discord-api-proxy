@@ -48,8 +48,10 @@ export { TokenPoolDO } from './rotator/do';
  * 2. **Auth validation** - Rejects unauthenticated requests
  * 3. **Discord context** - Selects bot/user token and user-agent
  * 4. **Snowflake validation** - Validates Discord IDs in URL path segments
- * 5. **Custom routes** - Business logic endpoints (e.g. Kindness Cascade)
- * 6. **Proxy forwarder** - Catch-all that forwards to Discord API
+ * 5. **Identity resolution** - Read-only fingerprint/versions + pool plan (no DO round trip on a malformed path)
+ * 6. **Subrequest logger** - Wraps `proxyFetch` for streaming visibility
+ * 7. **Custom routes** - Business logic endpoints (e.g. Kindness Cascade)
+ * 8. **Proxy forwarder** - Catch-all that forwards to Discord API
  *
  * @param mockFetch - Optional fetch override for integration tests.
  * @param mockTokenPool - Optional in-memory TokenPoolClient for tests; bypasses the real DO.
@@ -124,14 +126,17 @@ export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolCli
   // Sieve Layer 3: Context Parsing (token selection + user-agent)
   app.use('*', discordContextMiddleware);
 
-  // Sieve Layer 3.5: Identity resolution (fingerprint/versions; never
+  // Sieve Layer 3.5: Snowflake Validation (Discord ID format checks).
+  // Runs BEFORE identity resolution: the validator reads only the request
+  // path, while identity resolution costs a DO round trip - a malformed
+  // path must be rejected without that cost.
+  app.use('*', snowflakeValidatorMiddleware);
+
+  // Sieve Layer 3.6: Identity resolution (fingerprint/versions; never
   // acquires or leases - only reads). Runs after discord-context so
-  // c.var.discordToken has a static-token fallback in place; runs before
+  // c.var.discordToken has a static-token fallback in place, and after
   // snowflake-validator so an invalid path never costs a DO round trip.
   app.use('*', identityMiddleware);
-
-  // Sieve Layer 4: Snowflake Validation (Discord ID format checks)
-  app.use('*', snowflakeValidatorMiddleware);
 
   // Sieve Layer 4.5: Subrequest Logger (wraps proxyFetch for streaming visibility)
   // Sits below auth/snowflake so unauthenticated traffic doesn't generate noise.

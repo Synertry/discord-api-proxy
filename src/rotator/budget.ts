@@ -17,8 +17,15 @@
  * - a Cloudflare challenge affects every identity in the pool, not just the
  * one that triggered it), checked before the identity's own per-identity
  * circuit (captcha - specific to that identity/account).
+ *
+ * Bucket rows are keyed `${discordBucketHash}@${topLevelResource(routeKey)}`
+ * when the route key carries a literal top-level resource id (see
+ * `deriveBudgetKey` in `bucket.ts`), else the bare hash; `routeToBucket`
+ * maps each route key to whichever row applies. Everything below reads that
+ * mapped key opaquely.
  */
 
+import { topLevelResource } from './bucket';
 import type { BucketBudget, RouteKey, ReleaseInput, IdentityCircuit, AbuseSignal, Lease } from './types';
 
 /** How long a captcha challenge blocks the specific identity that triggered it. */
@@ -199,12 +206,20 @@ export function applyOutcome(budget: BucketBudget, requestId: string | null, out
   let bucketStates = budget.bucketStates;
   let routeToBucket = budget.routeToBucket;
   if (outcome.discordBucketHash) {
+    // One opaque hash can cover more than one top-level resource, and the
+    // stored row is therefore scoped by the route's literal top-level
+    // resource: without scoping, exhausting one channel would appear to
+    // exhaust another, and whichever responded last would overwrite the
+    // other's row. `routeToBucket` points at the scoped row, and
+    // `evaluateBudget`/`grantLease` treat it as opaque.
+    const resource = topLevelResource(outcome.routeKey);
+    const stateKey = resource === undefined ? outcome.discordBucketHash : `${outcome.discordBucketHash}@${resource}`;
     bucketStates = {
       ...bucketStates,
-      [outcome.discordBucketHash]: { remaining: outcome.remaining ?? 0, resetAt: now + (outcome.resetAfterMs ?? 0) },
+      [stateKey]: { remaining: outcome.remaining ?? 0, resetAt: now + (outcome.resetAfterMs ?? 0) },
     };
     bucketStates = evictOldestBucketsIfOverCap(bucketStates);
-    routeToBucket = recordRouteBucket(routeToBucket, outcome.routeKey, outcome.discordBucketHash, bucketStates);
+    routeToBucket = recordRouteBucket(routeToBucket, outcome.routeKey, stateKey, bucketStates);
   }
 
   let circuit = budget.circuit;

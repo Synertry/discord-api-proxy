@@ -22,7 +22,7 @@
  * `meta:upstream-circuit` record blocks every identity at once on a
  * Cloudflare/edge-level signal (shared egress IP - not account-specific);
  * `applyOutcome` never writes to that record itself, so a per-identity
- * `release`/`recordStaticOutcome` call always applies `openUpstreamCircuit`
+ * `release`/`settleStatic` call always applies `openUpstreamCircuit`
  * as a second, explicit step.
  */
 
@@ -135,6 +135,32 @@ function hydrateBudget<T extends Partial<BucketBudget>>(raw: T): T & BucketBudge
   };
 }
 
+/**
+ * Hydrate a pool token read from storage. A `token:<label>` row persisted
+ * before leases existed carries an `inFlightCount` but no `leases` field at
+ * all. With no lease on the record, no later `release` can ever match one, so
+ * that count could only stay inflated (and keep the token penalized in LRU
+ * selection) forever: start such a token from zero in-flight.
+ */
+function hydrateToken(raw: TokenState): TokenState {
+  const hydrated = hydrateBudget(raw);
+  if (raw.leases !== undefined) return hydrated;
+  return { ...hydrated, inFlightCount: 0 };
+}
+
+/**
+ * Drop a pool token's abandoned leases and reconcile `inFlightCount` to the
+ * leases that remain: the count is what LRU selection orders by, so a lease
+ * past `LEASE_TTL_MS` must stop counting against its token, not merely stop
+ * being listed. Returns the input unchanged when nothing was pruned (leaving
+ * `inFlightCount` - which normally equals `leases.length` - untouched).
+ */
+function pruneTokenLeases(token: TokenState, now: number): TokenState {
+  const pruned = pruneLeases(token, now);
+  if (pruned === token) return token;
+  return { ...pruned, inFlightCount: pruned.leases.length };
+}
+
 /** A fresh, empty guard for a static identity never seen before. */
 function freshStaticGuard(identityHash: string, now: number): StaticIdentityState {
   return { identityHash, lastSeenAt: now, ...emptyBudget() };
@@ -152,14 +178,42 @@ function hydrateStaticGuard(raw: StaticIdentityState, identityHash: string): Sta
  */
 export class TokenPoolDO extends DurableObject<Bindings> {
   /**
+   * Tail of this instance's mutation queue. Every read-modify-write RPC
+   * (acquire, acquireByLabel, release, leaseStatic, settleStatic, register,
+   * reset, setTokenFingerprintProfile) runs through `#serialize`, so two calls
+   * can never both read the same record, both decide from it, and have the
+   * later write silently discard the earlier one. Input gates are documented
+   * to prevent that interleaving for storage calls, but a lost lease (two
+   * concurrent `leaseStatic` calls both granted, one persisted) was observed
+   * under concurrent load in the Workers test runtime, and a dropped lease is
+   * exactly the double dispatch this guard exists to prevent - so the
+   * ordering is made explicit instead of assumed. Reads stay unqueued.
+   */
+  #mutationTail: Promise<unknown> = Promise.resolve();
+
+  #serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.#mutationTail.then(fn);
+    // The queue only tracks completion; `run` still rejects to its own caller.
+    this.#mutationTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /**
    * Acquire a token for the given slot + route. Updates lastUsedAt and
    * inFlightCount on the chosen token; persists immediately. If the chosen
    * token has no `fingerprintProfileId` yet, assigns one deterministically.
    */
   async acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult> {
+    return this.#serialize(() => this.#acquire(slot, routeKey, guildId));
+  }
+
+  async #acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult> {
     const now = Date.now();
     const [rawTokens, upstreamCircuit] = await Promise.all([this.loadAllTokens(), this.getUpstreamCircuit()]);
-    const tokens = rawTokens.map((raw) => pruneLeases(raw, now));
+    const tokens = rawTokens.map((raw) => pruneTokenLeases(raw, now));
 
     const result = chooseToken(tokens, slot, routeKey, now, guildId, upstreamCircuit);
     if (!result.chosen) {
@@ -199,6 +253,10 @@ export class TokenPoolDO extends DurableObject<Bindings> {
    * (globalCooldownUntil, bucket cooling, an open circuit, ineligibleGuilds TTL).
    */
   async acquireByLabel(label: string, slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult> {
+    return this.#serialize(() => this.#acquireByLabel(label, slot, routeKey, guildId));
+  }
+
+  async #acquireByLabel(label: string, slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult> {
     const now = Date.now();
     const [raw, upstreamCircuit] = await Promise.all([
       this.ctx.storage.get<TokenState>(`${TOKEN_KEY_PREFIX}${label}`),
@@ -207,7 +265,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
     if (!raw) {
       return { ok: false, reason: 'no-eligible-token', retryAfter: 60_000 };
     }
-    const hydrated = pruneLeases(hydrateBudget(raw), now);
+    const hydrated = pruneTokenLeases(hydrateToken(raw), now);
 
     const verdict = evaluateTokenEligibility(hydrated, slot, routeKey, now, guildId, upstreamCircuit);
     if (!verdict.ok) {
@@ -246,10 +304,14 @@ export class TokenPoolDO extends DurableObject<Bindings> {
    * release calls are ignored (idempotent on requestId).
    */
   async release(label: string, requestId: string, outcome: ReleaseInput): Promise<void> {
+    return this.#serialize(() => this.#release(label, requestId, outcome));
+  }
+
+  async #release(label: string, requestId: string, outcome: ReleaseInput): Promise<void> {
     const now = Date.now();
     const raw = await this.ctx.storage.get<TokenState>(`${TOKEN_KEY_PREFIX}${label}`);
     if (!raw) return; // Token deleted before release; drop silently.
-    const t = pruneLeases(hydrateBudget(raw), now);
+    const t = pruneTokenLeases(hydrateToken(raw), now);
 
     // Stale-write guard: duplicate or out-of-order
     if (t.lastReleaseRequestId === requestId) return;
@@ -360,6 +422,10 @@ export class TokenPoolDO extends DurableObject<Bindings> {
    * at `PENDING_LEASE_CAP` rather than evicting a still-outstanding lease.
    */
   async leaseStatic(identityHash: string, routeKey: RouteKey): Promise<LeaseStaticResult> {
+    return this.#serialize(() => this.#leaseStatic(identityHash, routeKey));
+  }
+
+  async #leaseStatic(identityHash: string, routeKey: RouteKey): Promise<LeaseStaticResult> {
     const now = Date.now();
     const guardKey = `${STATIC_GUARD_PREFIX}${identityHash}`;
     const [raw, upstreamCircuit] = await Promise.all([this.ctx.storage.get<StaticIdentityState>(guardKey), this.getUpstreamCircuit()]);
@@ -392,6 +458,10 @@ export class TokenPoolDO extends DurableObject<Bindings> {
    * is a complete no-op with zero storage writes and zero side effects.
    */
   async settleStatic(identityHash: string, requestId: string, outcome: ReleaseInput): Promise<void> {
+    return this.#serialize(() => this.#settleStatic(identityHash, requestId, outcome));
+  }
+
+  async #settleStatic(identityHash: string, requestId: string, outcome: ReleaseInput): Promise<void> {
     const now = Date.now();
     const guardKey = `${STATIC_GUARD_PREFIX}${identityHash}`;
     const raw = await this.ctx.storage.get<StaticIdentityState>(guardKey);
@@ -429,6 +499,10 @@ export class TokenPoolDO extends DurableObject<Bindings> {
 
   /** Register a new token. Caller must enforce pool cap before calling. */
   async register(input: RegisterInput): Promise<{ ok: true; label: string; registeredAt: number } | { ok: false; reason: 'label-exists' }> {
+    return this.#serialize(() => this.#register(input));
+  }
+
+  async #register(input: RegisterInput): Promise<{ ok: true; label: string; registeredAt: number } | { ok: false; reason: 'label-exists' }> {
     const now = Date.now();
     const key = `${TOKEN_KEY_PREFIX}${input.label}`;
     const existing = await this.ctx.storage.get<TokenState>(key);
@@ -447,10 +521,14 @@ export class TokenPoolDO extends DurableObject<Bindings> {
 
   /** Reset a token to active status (operator action after fixing whatever caused 401s). */
   async reset(label: string): Promise<{ ok: true } | { ok: false; reason: 'not-found' }> {
+    return this.#serialize(() => this.#reset(label));
+  }
+
+  async #reset(label: string): Promise<{ ok: true } | { ok: false; reason: 'not-found' }> {
     const key = `${TOKEN_KEY_PREFIX}${label}`;
     const raw = await this.ctx.storage.get<TokenState>(key);
     if (!raw) return { ok: false, reason: 'not-found' };
-    const t = hydrateBudget(raw);
+    const t = hydrateToken(raw);
     t.consecutive401s = 0;
     t.status = 'active';
     t.globalCooldownUntil = 0;
@@ -489,6 +567,10 @@ export class TokenPoolDO extends DurableObject<Bindings> {
    * a constant-time generic 400.
    */
   async setTokenFingerprintProfile(label: string, profileId: string): Promise<{ ok: true } | { ok: false; reason: 'not-found' }> {
+    return this.#serialize(() => this.#setTokenFingerprintProfile(label, profileId));
+  }
+
+  async #setTokenFingerprintProfile(label: string, profileId: string): Promise<{ ok: true } | { ok: false; reason: 'not-found' }> {
     const key = `${TOKEN_KEY_PREFIX}${label}`;
     const t = await this.ctx.storage.get<TokenState>(key);
     if (!t) return { ok: false, reason: 'not-found' };
@@ -544,7 +626,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
 
   private async loadAllTokens(): Promise<TokenState[]> {
     const map = await this.ctx.storage.list<TokenState>({ prefix: TOKEN_KEY_PREFIX });
-    return Array.from(map.values()).map(hydrateBudget);
+    return Array.from(map.values()).map(hydrateToken);
   }
 
   private async getUpstreamCircuit(): Promise<IdentityCircuit | null> {
@@ -583,6 +665,9 @@ function rollup(tokens: TokenState[], slot: Slot, now: number): SlotHealth {
       invalid++;
       continue;
     }
+    // A suspended token is out of rotation for an operator reason, so it is
+    // neither available (active) nor temporarily benched (cooling).
+    if (t.status !== 'active') continue;
     if (t.globalCooldownUntil > now || (t.circuit && t.circuit.until > now)) {
       cooling++;
     } else {

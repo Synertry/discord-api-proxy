@@ -12,7 +12,8 @@
  * `token-rotator.ts`.
  *
  * Runs after `discordContextMiddleware` (so `c.var.discordToken` already holds
- * a static-token fallback) and before `snowflakeValidatorMiddleware`.
+ * a static-token fallback) and after `snowflakeValidatorMiddleware`, so a
+ * malformed path is rejected before this layer ever costs a DO round trip.
  *
  * Never acquires or leases anything - only reads. This closes the
  * cross-boundary lease-leak the pre-rewrite middleware had for pool tokens:
@@ -43,7 +44,7 @@ import type { Bindings } from '../types';
 import type { AuthVariables } from './auth';
 import type { DiscordContextVariables } from './discord-context';
 import { parseProxyTokenHeader } from './proxy-token-header';
-import { deriveRouteKey, extractGuildId, isRotatableRoute } from '../rotator/bucket';
+import { deriveBudgetKey, extractGuildId, isRotatableRoute } from '../rotator/bucket';
 import { createTokenPoolClient, getPoolStub } from '../rotator/client';
 import { resolveClientVersions } from '../fingerprint/versions';
 import { resolveProfileId, resolveCustom } from '../fingerprint/profiles';
@@ -93,7 +94,13 @@ export const identityMiddleware = createMiddleware<{
   // is only a fallback for an empty-pool/no-eligible-token case - blocking
   // it here would wrongly reject a request the pool has plenty of capacity
   // for, just because the unrelated static identity happens to be circuited.
-  if (block && !rotatable) {
+  //
+  // `/custom/*` is exempt for the same reason: those handlers lease at their
+  // own point of use (the shared pager leases the static guard and reports
+  // the block itself; bingo uses the pool only), so a static circuit must
+  // not pre-block a pool-only endpoint before its handler ever runs.
+  const isCustomRoute = c.req.path === '/custom' || c.req.path.startsWith('/custom/');
+  if (block && !rotatable && !isCustomRoute) {
     return blockResponse(c, block);
   }
 
@@ -101,7 +108,10 @@ export const identityMiddleware = createMiddleware<{
     c.set('poolPlan', {
       slot,
       selector: selector === 'auto' ? 'auto' : { label: selector.label },
-      routeKey: deriveRouteKey(c.req.method, c.req.path),
+      // The budget key, not the normalized route key: rate-limit state is
+      // scoped per top-level resource, and the rotation allowlist above
+      // still reads the normalized form (`isRotatableRoute`).
+      routeKey: deriveBudgetKey(c.req.method, c.req.path),
       guildId: extractGuildId(c.req.path),
     });
   }

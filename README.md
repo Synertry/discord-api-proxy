@@ -235,6 +235,7 @@ test/
   rotator/                    DO + pure-function tests via @cloudflare/vitest-pool-workers
   fingerprint/                Header composer, profile registry, session, versions tests
   custom/                     Shared pager + per-event classifier/tallier/formatter/handler tests
+  scheduled/                  Client-versions refresh (independent persistence of both records)
 ```
 
 ## Custom Endpoints
@@ -261,7 +262,7 @@ Returns `{ "tally": 0 }`. Placeholder for now. Not yet imported from my private 
 ## Testing
 
 ```bash
-bun run test           # Run all 635 tests across 42 suites
+bun run test           # Run all 685 tests across 43 suites
 bun run test -- --ui   # Open Vitest UI
 ```
 

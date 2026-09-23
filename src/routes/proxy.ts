@@ -17,6 +17,12 @@
  * This is the ONLY module that ever pairs acquire/release (pool tokens) or
  * lease/settle (static tokens via the identity guard) - always within this
  * one function, immediately around the single outbound fetch each guards.
+ * Every budget, lease, settle, release, and response-inspection call uses the
+ * budget key (`deriveBudgetKey`), while route-type decisions (message-send
+ * fill, typing, `X-Context-Properties`) use the normalized `deriveRouteKey`;
+ * both are derived from `c.req.path`, the same decoded source the identity
+ * middleware used, so a lease is always settled under the key it was
+ * acquired with.
  * `identityMiddleware` upstream never acquires or leases anything; it only
  * resolves a read-only fallback `identity` (always present for non-bot
  * requests) and, on a pool-eligible route, a `poolPlan` describing how to
@@ -50,9 +56,9 @@ import { blockResponse } from '../rotator/static-guard';
 import type { StaticGuard } from '../rotator/static-guard';
 import { inspectResponse } from '../rotator/signals';
 import { retryDelayMs } from '../rotator/budget';
-import { deriveRouteKey, extractGuildId } from '../rotator/bucket';
+import { deriveBudgetKey, deriveRouteKey, extractGuildId } from '../rotator/bucket';
 import { createTokenPoolClient, getPoolStub } from '../rotator/client';
-import type { AcquireResult, PoolPlan, RequestIdentity, RouteKey, Slot, TokenPoolClient } from '../rotator/types';
+import type { AcquireResult, PoolPlan, ReleaseInput, RequestIdentity, RouteKey, Slot, TokenPoolClient } from '../rotator/types';
 import type { ClientVersions } from '../fingerprint/versions';
 
 /** Catch-all proxy route - forwards any unmatched request to the Discord API. */
@@ -72,10 +78,9 @@ type RotatorVariablesLocal = {
 
 const DISCORD_API_BASE = 'https://discord.com/api/v10';
 const MESSAGE_SEND_ROUTE: RouteKey = 'POST:/channels/:id/messages';
-const TYPING_ROUTE: RouteKey = 'POST:/channels/:id/typing';
 /** Above this the message body is streamed through unread rather than parsed for defaults - abuse-signal bodies and real message payloads are always small. */
 const MAX_FILLABLE_BODY_BYTES = 65536;
-/** Comfortably below `STALE_LEASE_TTL_MS` in `rotator/do.ts` so a leased request is never pruned as abandoned out from under its own eventual settle. */
+/** Comfortably below `LEASE_TTL_MS` in `rotator/budget.ts` so a leased request is never pruned as abandoned out from under its own eventual settle. */
 const OUTBOUND_TIMEOUT_MS = 60_000;
 /** Discord's snowflake epoch (2015-01-01T00:00:00.000Z), used to synthesize a client-like `nonce`. */
 const DISCORD_EPOCH_MS = 1420070400000n;
@@ -91,11 +96,21 @@ const defaultWait = (ms: number): Promise<void> => {
 proxyRoute.all('/*', async (c) => {
   const url = new URL(c.req.url);
   const method = c.req.method;
-  const pathname = url.pathname;
-  const discordUrl = `${DISCORD_API_BASE}${pathname}${url.search}`;
+  // Both keys come from Hono's decoded request path, the same source the
+  // identity middleware built its pool plan from - deriving them from the raw
+  // `url.pathname` instead would acquire a lease under one key and release it
+  // under another (e.g. `/messages/%73earch`), which the DO drops as a
+  // mismatch, leaking the lease. The outbound Discord URL still uses the raw
+  // pathname + search so percent-encoding is forwarded untouched.
+  const path = c.req.path;
+  const discordUrl = `${DISCORD_API_BASE}${url.pathname}${url.search}`;
   const kind: DiscordTokenKind = c.var.discordTokenKind ?? 'bot';
-  const routeKey = deriveRouteKey(method, pathname);
-  const guildId = extractGuildId(pathname);
+  // `routeKey` drives route-TYPE decisions (message-send body fill, typing,
+  // `X-Context-Properties`); `budgetKey` drives every budget/lease/settle
+  // call. They differ only in the literal top-level resource id.
+  const routeKey = deriveRouteKey(method, path);
+  const budgetKey = deriveBudgetKey(method, path);
+  const guildId = extractGuildId(path);
   const fetcher = c.var.proxyFetch ?? fetch;
   const wait = c.var.proxyWait ?? defaultWait;
 
@@ -171,7 +186,7 @@ proxyRoute.all('/*', async (c) => {
     // ---- Typing (opt-in; only for a real, non-empty message send). ----
     let typingDispatched = false;
     if (routeKey === MESSAGE_SEND_ROUTE && messageContent && c.req.header('X-Proxy-Typing') === 'on') {
-      typingDispatched = await dispatchTyping({ fetcher, pathname, identity, versions, guard, token, kind });
+      typingDispatched = await dispatchTyping({ fetcher, path, identity, versions, guard, token, kind });
       if (typingDispatched) {
         await wait(typingWaitMs(messageContent.length));
       }
@@ -180,7 +195,7 @@ proxyRoute.all('/*', async (c) => {
     // ---- Main dispatch. Pool tokens already hold their lease from `attemptPoolAcquire`; static tokens lease here, immediately before this one fetch. ----
     let mainLease: { requestId: string } | undefined;
     if (guard) {
-      const lease = await guard.lease(routeKey);
+      const lease = await guard.lease(budgetKey);
       if (!lease.ok) return blockResponse(c, lease.block);
       mainLease = lease;
     }
@@ -198,9 +213,12 @@ proxyRoute.all('/*', async (c) => {
       applyContextProperties(headers, routeKey);
 
       const response = await dispatch(fetcher, discordUrl, method, headers, bodyInit);
-      const outcome = await inspectResponse(response, routeKey, guildId);
+      const outcome = await inspectResponse(response, budgetKey, guildId);
 
       if (usingPool && client && poolLease) {
+        // `budgetKey` equals `plan.routeKey` (the key the acquire above was
+        // granted under - both derive from `c.req.path`), so the DO matches
+        // this release to its outstanding lease instead of dropping it.
         await client.release(poolLease.label, poolLease.requestId, outcome);
         poolReleased = true;
         if (response.status === 429 && plan) {
@@ -211,6 +229,7 @@ proxyRoute.all('/*', async (c) => {
             versions,
             kind,
             method,
+            routeKey,
             headers: c.req.raw.headers,
             discordUrl,
             fetcher,
@@ -227,14 +246,18 @@ proxyRoute.all('/*', async (c) => {
       return response;
     } catch (err: unknown) {
       if (guard && mainLease && !mainSettled) {
-        await guard.settle(mainLease.requestId, { status: 599, routeKey }).catch((cleanupErr: unknown) => {
+        await guard.settle(mainLease.requestId, { status: 599, routeKey: budgetKey }).catch((cleanupErr: unknown) => {
           console.error('PROXY guard cleanup failed:', cleanupErr);
         });
       }
-      if (usingPool && client && poolLease && !poolReleased) {
-        await client.release(poolLease.label, poolLease.requestId, { status: 599, routeKey }).catch((cleanupErr: unknown) => {
-          console.error('PROXY pool release cleanup failed:', cleanupErr);
-        });
+      if (plan && client && poolLease && !poolReleased) {
+        // The pool release key must equal the acquire key, and `plan.routeKey`
+        // is exactly that budget key - the plan that produced this lease.
+        await client.release(poolLease.label, poolLease.requestId, { status: 599, routeKey: plan.routeKey }).catch(
+          (cleanupErr: unknown) => {
+            console.error('PROXY pool release cleanup failed:', cleanupErr);
+          },
+        );
       }
       throw err;
     }
@@ -260,7 +283,15 @@ async function dispatch(
   return await fetcher(discordUrl, init as RequestInit);
 }
 
-/** Parse a JSON message-send body, filling `nonce`/`tts`/`flags` when absent. Forwards the original text unchanged on parse failure or a non-object body. */
+/**
+ * Fill `nonce`/`tts`/`flags` on a JSON message-send body. The body is never
+ * re-serialized: a caller's numeric `nonce` above 2^53 (Discord accepts
+ * 64-bit ids) would round through `JSON.parse` + `JSON.stringify`, so the
+ * original text is forwarded byte-for-byte when nothing is missing, and
+ * otherwise the missing `"key":value` pairs are spliced in textually before
+ * the final closing brace, leaving every original lexeme untouched. Forwards
+ * the original text unchanged on parse failure or a non-object body.
+ */
 function fillMessageBody(text: string): { body: string; content: string | undefined } {
   let parsed: unknown;
   try {
@@ -272,11 +303,18 @@ function fillMessageBody(text: string): { body: string; content: string | undefi
     return { body: text, content: undefined };
   }
   const obj = parsed as Record<string, unknown>;
-  if (obj.nonce === undefined) obj.nonce = String((BigInt(Date.now()) - DISCORD_EPOCH_MS) << 22n);
-  if (obj.tts === undefined) obj.tts = false;
-  if (obj.flags === undefined) obj.flags = 0;
+  const additions: string[] = [];
+  if (obj.nonce === undefined) additions.push(`"nonce":${JSON.stringify(String((BigInt(Date.now()) - DISCORD_EPOCH_MS) << 22n))}`);
+  if (obj.tts === undefined) additions.push('"tts":false');
+  if (obj.flags === undefined) additions.push('"flags":0');
   const content = typeof obj.content === 'string' && obj.content.length > 0 ? obj.content : undefined;
-  return { body: JSON.stringify(obj), content };
+  if (additions.length === 0) return { body: text, content };
+
+  const close = text.lastIndexOf('}');
+  const beforeClose = text.slice(0, close).trimEnd();
+  // `{}` (or all-whitespace members) must not gain a leading comma.
+  const separator = beforeClose.endsWith('{') ? '' : ',';
+  return { body: `${beforeClose}${separator}${additions.join(',')}${text.slice(close)}`, content };
 }
 
 /**
@@ -415,19 +453,23 @@ function poolIdentity(attempt: Extract<PoolAcquireOutcome, { kind: 'acquired' }>
 /** Dispatch the opt-in `/typing` indicator, guarded if a `StaticGuard` is present, unguarded (never erroring) otherwise. Returns whether it was actually dispatched. */
 async function dispatchTyping(args: {
   fetcher: typeof fetch;
-  pathname: string;
+  path: string;
   identity: RequestIdentity | undefined;
   versions: ClientVersions;
   guard: StaticGuard | undefined;
   token: string;
   kind: DiscordTokenKind;
 }): Promise<boolean> {
-  const channelId = args.pathname.match(/^\/channels\/(\d{17,20})\//)?.[1];
+  const channelId = args.path.match(/^\/channels\/(\d{17,20})\//)?.[1];
   if (!channelId) return false;
   const typingUrl = `${DISCORD_API_BASE}/channels/${channelId}/typing`;
+  // Typing is its own Discord rate-limit bucket, and the budget key keeps
+  // this channel's literal id so the lease is scoped to the same resource
+  // the message send that follows it belongs to.
+  const typingRouteKey = deriveBudgetKey('POST', `/channels/${channelId}/typing`);
 
   if (args.guard) {
-    const lease = await args.guard.lease(TYPING_ROUTE);
+    const lease = await args.guard.lease(typingRouteKey);
     if (!lease.ok) return false; // Blocked - skip typing entirely, fall through to the main dispatch with no wait.
     let settled = false;
     try {
@@ -438,13 +480,13 @@ async function dispatchTyping(args: {
         versions: args.versions,
       });
       const response = await dispatch(args.fetcher, typingUrl, 'POST', headers, undefined);
-      const outcome = await inspectResponse(response, TYPING_ROUTE);
+      const outcome = await inspectResponse(response, typingRouteKey);
       await args.guard.settle(lease.requestId, outcome);
       settled = true;
       await response.body?.cancel();
     } catch (err: unknown) {
       if (!settled) {
-        await args.guard.settle(lease.requestId, { status: 599, routeKey: TYPING_ROUTE }).catch((cleanupErr: unknown) => {
+        await args.guard.settle(lease.requestId, { status: 599, routeKey: typingRouteKey }).catch((cleanupErr: unknown) => {
           console.error('PROXY typing guard cleanup failed:', cleanupErr);
         });
       }
@@ -483,11 +525,13 @@ async function retryPool(args: {
   versions: ClientVersions;
   kind: DiscordTokenKind;
   method: string;
+  /** The normalized route-type key - drives `X-Context-Properties` only; every pool call uses `plan.routeKey`. */
+  routeKey: RouteKey;
   headers: Headers;
   discordUrl: string;
   fetcher: typeof fetch;
   wait: (ms: number) => Promise<void>;
-  outcome: Awaited<ReturnType<typeof inspectResponse>>;
+  outcome: ReleaseInput;
   fallback: Response;
 }): Promise<Response> {
   await args.wait(retryDelayMs(args.outcome));
@@ -505,9 +549,10 @@ async function retryPool(args: {
       versions: args.versions,
       inbound: args.headers,
     });
-    applyContextProperties(retryHeaders, args.plan.routeKey);
+    applyContextProperties(retryHeaders, args.routeKey);
 
     const retryResponse = await dispatch(args.fetcher, args.discordUrl, args.method, retryHeaders, undefined);
+    // Same budget key as the acquire above, so the retry lease settles.
     const retryOutcome = await inspectResponse(retryResponse, args.plan.routeKey, args.plan.guildId);
     await args.client.release(retry.label, retry.requestId, retryOutcome);
     return retryResponse;

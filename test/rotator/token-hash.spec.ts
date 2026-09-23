@@ -26,11 +26,4 @@ describe('hashToken', () => {
     const b = await hashToken('token-b');
     expect(a).not.toBe(b);
   });
-
-  it('proves the same physical token used under two kinds hashes to the same key (the reason kind alone is unsafe)', async () => {
-    const sharedToken = 'shared-secret-used-for-both-slots';
-    const a = await hashToken(sharedToken);
-    const b = await hashToken(sharedToken);
-    expect(a).toBe(b);
-  });
 });

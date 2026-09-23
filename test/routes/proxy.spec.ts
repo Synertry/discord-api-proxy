@@ -10,10 +10,9 @@
  * @module routes/proxy.spec
  * Integration tests for the catch-all Discord API proxy: header allowlist,
  * fingerprint composition, message-body fill, opt-in typing, and - since
- * `proxy.ts` is now the only place that ever pairs acquire/release or
- * lease/settle - the pool-acquire and static-guard behaviors that used to
- * live in `test/middleware/token-rotator.spec.ts` (see that file's own
- * header comment: its cases move here, then it is deleted).
+ * `proxy.ts` is the only place that ever pairs acquire/release or
+ * lease/settle - the pool-acquire and static-guard behaviors (the middleware
+ * that used to own them, and its spec, are gone).
  *
  * `discordContextMiddleware` only picks a user token automatically for a
  * path containing `/guilds`; every other user-kind request in this file
@@ -258,6 +257,57 @@ describe('Proxy Route (message-send body fill and opt-in typing)', () => {
     expect(sent.flags).toBe(64);
   });
 
+  it('forwards a body with all three fields present byte-for-byte, keeping a numeric nonce beyond 2^53', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: '1' }));
+    const app = createApp(mockFetch as unknown as typeof fetch);
+    const body = '{"content":"hi","nonce":9007199254740993,"tts":false,"flags":0}';
+    const req = new Request(messagesUrl(), {
+      method: 'POST',
+      headers: { 'x-auth-key': 'secret-key', 'x-proxy-context': 'user', 'content-type': 'application/json' },
+      body,
+    });
+    await app.request(req, undefined, MOCK_ENV);
+    expect(callInit(mockFetch).body).toBe(body);
+  });
+
+  it('keeps a numeric nonce beyond 2^53 intact when it splices in the missing tts/flags', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: '1' }));
+    const app = createApp(mockFetch as unknown as typeof fetch);
+    const req = new Request(messagesUrl(), {
+      method: 'POST',
+      headers: { 'x-auth-key': 'secret-key', 'x-proxy-context': 'user', 'content-type': 'application/json' },
+      body: '{"content":"hi","nonce":9007199254740993}',
+    });
+    await app.request(req, undefined, MOCK_ENV);
+    expect(callInit(mockFetch).body).toBe('{"content":"hi","nonce":9007199254740993,"tts":false,"flags":0}');
+  });
+
+  it('fills an empty JSON object without a leading comma', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: '1' }));
+    const app = createApp(mockFetch as unknown as typeof fetch);
+    const req = new Request(messagesUrl(), {
+      method: 'POST',
+      headers: { 'x-auth-key': 'secret-key', 'x-proxy-context': 'user', 'content-type': 'application/json' },
+      body: '{}',
+    });
+    await app.request(req, undefined, MOCK_ENV);
+    expect(callInit(mockFetch).body).toMatch(/^\{"nonce":"\d{17,20}","tts":false,"flags":0\}$/);
+  });
+
+  it('splices the fill before the final closing brace when the last member is a nested object', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: '1' }));
+    const app = createApp(mockFetch as unknown as typeof fetch);
+    const req = new Request(messagesUrl(), {
+      method: 'POST',
+      headers: { 'x-auth-key': 'secret-key', 'x-proxy-context': 'user', 'content-type': 'application/json' },
+      body: '{"content":"hi","embed":{"title":"x"}}',
+    });
+    await app.request(req, undefined, MOCK_ENV);
+    expect(callInit(mockFetch).body).toMatch(
+      /^\{"content":"hi","embed":\{"title":"x"\},"nonce":"\d{17,20}","tts":false,"flags":0\}$/,
+    );
+  });
+
   it('forwards a malformed JSON body unchanged rather than crashing', async () => {
     const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: '1' }));
     const app = createApp(mockFetch as unknown as typeof fetch);
@@ -292,6 +342,42 @@ describe('Proxy Route (message-send body fill and opt-in typing)', () => {
     expect(callUrl(mockFetch, 1)).toContain('/messages');
     expect(waitedMs.length).toBeGreaterThanOrEqual(1);
     expect(waitedMs[0]).toBeGreaterThanOrEqual(1000);
+  });
+
+  it('leases and settles the opt-in typing dispatch under the typing budget key, and the message under its own', async () => {
+    let leases = 0;
+    const lease = vi.fn(async (_identityHash: string, _routeKey: string) => ({ ok: true as const, requestId: `lease-${++leases}` }));
+    const settle = vi.fn(async (_identityHash: string, _requestId: string, _outcome: ReleaseInput) => undefined);
+    const client: TokenPoolClient = {
+      acquire: async () => ({ ok: false, reason: 'empty-pool', retryAfter: 0 }),
+      release: async () => undefined,
+      prepareStatic: async () => ({ fingerprint: null, versions: { build: null, chrome: null }, block: null }),
+      leaseStatic: lease,
+      settleStatic: settle,
+    };
+    const mockFetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/typing')) return new Response(null, { status: 204 });
+      return jsonResponse({ id: '1' });
+    });
+    const app = createApp(mockFetch as unknown as typeof fetch, client, async () => undefined);
+    const req = new Request(messagesUrl(), {
+      method: 'POST',
+      headers: { 'x-auth-key': 'secret-key', 'x-proxy-context': 'user', 'content-type': 'application/json', 'X-Proxy-Typing': 'on' },
+      body: JSON.stringify({ content: 'hello there' }),
+    });
+    const res = await app.request(req, undefined, MOCK_ENV);
+    expect(res.status).toBe(200);
+
+    // Both budget keys carry the literal channel id; each settle reuses the
+    // exact key its own lease was granted under.
+    expect(lease.mock.calls.map((call) => call[1])).toEqual([
+      'POST:/channels/123456789012345678/typing',
+      'POST:/channels/123456789012345678/messages',
+    ]);
+    expect(settle.mock.calls.map((call) => [call[1], call[2].routeKey])).toEqual([
+      ['lease-1', 'POST:/channels/123456789012345678/typing'],
+      ['lease-2', 'POST:/channels/123456789012345678/messages'],
+    ]);
   });
 
   it('without X-Proxy-Typing, dispatches only /messages', async () => {
@@ -413,8 +499,46 @@ describe('Proxy Route (pool acquire, auto selector)', () => {
     const res = await app.request(req, undefined, MOCK_ENV);
     expect(res.status).toBe(200);
     expect(callHeaders(mockFetch).get('Authorization')).toBe('POOLED_SECRET');
-    expect(acquire).toHaveBeenCalledWith('default', 'GET:/guilds/:id/messages/search', '219564597349318656');
-    expect(release).toHaveBeenCalledWith('tok-3', 'req-1', expect.objectContaining({ status: 200 }));
+    expect(acquire).toHaveBeenCalledWith('default', 'GET:/guilds/219564597349318656/messages/search', '219564597349318656');
+    expect(release).toHaveBeenCalledWith(
+      'tok-3',
+      'req-1',
+      expect.objectContaining({ status: 200, routeKey: 'GET:/guilds/219564597349318656/messages/search' }),
+    );
+  });
+
+  it('releases under the exact route key it acquired with when the path is percent-encoded', async () => {
+    // `%73earch` decodes to `search`, so this is a rotatable route; the old
+    // raw-`url.pathname` release key (`.../messages/%73earch`) never matched
+    // the acquired key and the DO silently dropped the release, leaking the
+    // lease forever.
+    const acquire = vi.fn(async (_slot: string, _routeKey: string, _guildId?: string): Promise<AcquireResult> => ({
+      ok: true,
+      label: 'tok-1',
+      tokenSecret: 'POOLED_1',
+      requestId: 'req-1',
+      fingerprintProfileId: 'chrome-win-de',
+    }));
+    const release = vi.fn(async (_label: string, _requestId: string, _outcome: ReleaseInput) => undefined);
+    const client: TokenPoolClient = { acquire, release };
+    const mockFetch = vi.fn().mockResolvedValue(new Response('OK', { status: 200 }));
+    const app = createApp(mockFetch as unknown as typeof fetch, client);
+
+    const res = await app.request(
+      new Request('http://localhost/guilds/219564597349318656/messages/%73earch?author_id=999', {
+        headers: { 'x-auth-key': 'secret-key' },
+      }),
+      undefined,
+      MOCK_ENV,
+    );
+    expect(res.status).toBe(200);
+
+    const acquiredKey = acquire.mock.calls[0][1];
+    expect(acquiredKey).toBe('GET:/guilds/219564597349318656/messages/search');
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(release.mock.calls[0][2]).toMatchObject({ routeKey: acquiredKey });
+    // The caller's raw encoding still reaches Discord untouched.
+    expect(callUrl(mockFetch)).toBe('https://discord.com/api/v10/guilds/219564597349318656/messages/%73earch?author_id=999');
   });
 
   it('returns 429 with Retry-After when the pool is fully cooling', async () => {
@@ -570,7 +694,12 @@ describe('Proxy Route (pool acquire, pinned label selector - no graceful fallbac
     expect(res.status).toBe(200);
     expect(callHeaders(mockFetch).get('Authorization')).toBe('PINNED_SECRET');
     expect(acquire).not.toHaveBeenCalled();
-    expect(acquireByLabel).toHaveBeenCalledWith('tok-local', 'default', 'GET:/guilds/:id/messages/search', '219564597349318656');
+    expect(acquireByLabel).toHaveBeenCalledWith(
+      'tok-local',
+      'default',
+      'GET:/guilds/219564597349318656/messages/search',
+      '219564597349318656',
+    );
   });
 
   it('returns 503 when the pinned label is not found (no graceful fallback)', async () => {
@@ -606,6 +735,36 @@ describe('Proxy Route (pool acquire, pinned label selector - no graceful fallbac
   });
 });
 
+describe('Proxy Route (sieve ordering)', () => {
+  it('rejects a malformed snowflake with the Discord-shaped 400 before any identity or DO work', async () => {
+    const prepareStatic = vi.fn(async () => ({ fingerprint: null, versions: { build: null, chrome: null }, block: null }));
+    const client: TokenPoolClient = {
+      acquire: vi.fn(async (): Promise<AcquireResult> => ({ ok: false, reason: 'empty-pool', retryAfter: 0 })),
+      release: vi.fn(),
+      prepareStatic,
+    };
+    const mockFetch = vi.fn();
+    const app = createApp(mockFetch as unknown as typeof fetch, client);
+
+    const res = await app.request(
+      new Request('http://localhost/channels/not-a-snowflake/messages', {
+        method: 'GET',
+        headers: { 'x-auth-key': 'secret-key', 'x-proxy-context': 'user' },
+      }),
+      undefined,
+      MOCK_ENV,
+    );
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: number };
+    expect(body.code).toBe(50035);
+    // The validator runs ahead of identity resolution, so a malformed path
+    // never costs the DO round trip `prepareStatic` would make.
+    expect(prepareStatic).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
 describe('Proxy Route (static-identity guard: lease-at-point-of-use)', () => {
   it('leases immediately before dispatch and settles immediately after, on the non-rotatable static path', async () => {
     const lease = vi.fn(async (_identityHash: string, _routeKey: string) => ({ ok: true as const, requestId: 'lease-1' }));
@@ -628,7 +787,41 @@ describe('Proxy Route (static-identity guard: lease-at-point-of-use)', () => {
     expect(lease).toHaveBeenCalledWith(expect.any(String), 'GET:/users/@me');
     expect(settle).toHaveBeenCalledTimes(1);
     expect(settle.mock.calls[0][1]).toBe('lease-1');
-    expect(settle.mock.calls[0][2].status).toBe(200);
+    // The settle carries the same key the lease was granted under.
+    expect(settle.mock.calls[0][2]).toMatchObject({ status: 200, routeKey: 'GET:/users/@me' });
+  });
+
+  it('leases the static guard under the budget key, not the id-collapsed normalized key', async () => {
+    const lease = vi.fn(async (_identityHash: string, _routeKey: string) => ({ ok: true as const, requestId: 'lease-1' }));
+    const settle = vi.fn(async (_identityHash: string, _requestId: string, _outcome: ReleaseInput) => undefined);
+    const client: TokenPoolClient = {
+      acquire: async () => ({ ok: false, reason: 'empty-pool', retryAfter: 0 }),
+      release: async () => undefined,
+      prepareStatic: async () => ({ fingerprint: null, versions: { build: null, chrome: null }, block: null }),
+      leaseStatic: lease,
+      settleStatic: settle,
+    };
+    const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: '1' }));
+    const app = createApp(mockFetch as unknown as typeof fetch, client);
+    const res = await app.request(
+      new Request('http://localhost/channels/123456789012345678/messages', {
+        method: 'POST',
+        headers: {
+          'x-auth-key': 'secret-key',
+          'x-proxy-context': 'user',
+          'content-type': 'application/json',
+          'X-Proxy-Token': 'static',
+        },
+        body: JSON.stringify({ content: 'hi' }),
+      }),
+      undefined,
+      MOCK_ENV,
+    );
+    expect(res.status).toBe(200);
+    // The route-type decisions still read the normalized key (`POST:/channels/:id/messages`,
+    // which is why the body was filled), but the guard's budget calls keep the literal channel id.
+    expect(lease).toHaveBeenCalledWith(expect.any(String), 'POST:/channels/123456789012345678/messages');
+    expect(settle.mock.calls[0][2]).toMatchObject({ routeKey: 'POST:/channels/123456789012345678/messages' });
   });
 
   it('returns 429 + X-Proxy-Block and never dispatches when leaseStatic blocks', async () => {

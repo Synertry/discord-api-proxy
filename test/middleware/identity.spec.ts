@@ -11,13 +11,9 @@
  * Tests `identityMiddleware`'s current, deliberately narrow contract: it
  * never acquires or leases anything, only resolves a read-only fallback
  * identity and records a `PoolPlan` for pool-eligible routes. Pool
- * acquire/release behaviors (previously tested against the old
- * `token-rotator.ts` middleware, before that responsibility moved to
- * `proxy.ts`) are NOT re-tested here - they move to `test/routes/proxy.spec.ts`
- * once `proxy.ts` is rewritten to own the acquire/release pairing; until then
- * the old `test/middleware/token-rotator.spec.ts` is left in place
- * (non-functional, its import already dangling) purely as a reference for
- * which cases must be ported.
+ * acquire/release and static lease/settle behaviors are NOT tested here -
+ * they live in `test/routes/proxy.spec.ts`, which owns the acquire/release
+ * pairing (the middleware that used to do it, and its spec, are gone).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -130,7 +126,7 @@ describe('identityMiddleware', () => {
     expect(leaseCalled).toBe(false);
   });
 
-  it('records a poolPlan with selector "auto" on a rotatable path with no X-Proxy-Token header', async () => {
+  it('records a poolPlan with selector "auto" and the budget key on a rotatable path with no X-Proxy-Token header', async () => {
     const client = mockClient();
     const app = buildApp({ client });
     const res = await app.request('/guilds/219564597349318656/messages/search', {}, MOCK_ENV);
@@ -138,7 +134,10 @@ describe('identityMiddleware', () => {
     expect(body.poolPlan).toEqual({
       slot: 'default',
       selector: 'auto',
-      routeKey: 'GET:/guilds/:id/messages/search',
+      // The budget key keeps the literal guild id (rate-limit state is scoped
+      // per top-level resource); the rotation allowlist still reads the
+      // normalized `GET:/guilds/:id/messages/search`.
+      routeKey: 'GET:/guilds/219564597349318656/messages/search',
       guildId: '219564597349318656',
     });
     // The fallback identity is still resolved even on a pool-eligible route -
@@ -233,6 +232,19 @@ describe('identityMiddleware', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as IdentityProbeBody;
     expect(body.poolPlan).not.toBeNull();
+  });
+
+  it('does NOT pre-block a /custom request on an open static circuit - those handlers lease at their own point of use', async () => {
+    const client = mockClient({
+      prepareStatic: async () => ({ ...EMPTY_PREPARE, block: { reason: 'cooldown', retryAfter: 1_800_000, signal: 'captcha' } }),
+    });
+    const app = buildApp({ client });
+    // Bingo is pool-only: it never leases the static guard, so a static
+    // captcha circuit must not reject the request before its handler runs
+    // (the request itself is rejected at the pool, not here).
+    const res = await app.request('/custom/chillzone/events/bingo/participant/987654321098765432/counts', {}, MOCK_ENV);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Proxy-Block')).toBeNull();
   });
 
   it('X-Proxy-Token: static DOES short-circuit on a block, since the static identity is then guaranteed to be used', async () => {

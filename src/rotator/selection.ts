@@ -18,6 +18,10 @@
  *
  * Extracted from the DO so callers can be tested independently with synthetic
  * TokenState arrays.
+ *
+ * Every `routeKey` parameter below is a budget key (`deriveBudgetKey`), whose
+ * bucket row is already scoped per top-level resource; this module only
+ * looks it up in `routeToBucket`/`bucketStates` and never interprets it.
  */
 
 import { evaluateBudget } from './budget';
