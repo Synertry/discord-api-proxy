@@ -14,12 +14,20 @@ describe('greasedBrandList', () => {
     expect(greasedBrandList(131)).toBe('"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"');
   });
 
-  it('matches a live capture for major 148 (grease char/version, verified against a real Chromium 148 client)', () => {
-    expect(greasedBrandList(148)).toContain('"Not/A)Brand";v="99"');
+  it('scatters the grease brand to the last position for major 148', () => {
+    expect(greasedBrandList(148)).toBe('"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"');
   });
 
-  it('matches a live capture for major 153 (grease char/version, verified against a real Chromium 153 client)', () => {
-    expect(greasedBrandList(153)).toContain('"Not_A Brand";v="8"');
+  it('scatters the grease brand to the middle position for major 153', () => {
+    expect(greasedBrandList(153)).toBe('"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"');
+  });
+
+  it('scatters the grease brand to the last position for major 124', () => {
+    expect(greasedBrandList(124)).toBe('"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"');
+  });
+
+  it('scatters the grease brand to the last position for major 130', () => {
+    expect(greasedBrandList(130)).toBe('"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"');
   });
 
   it('is deterministic for the same major', () => {

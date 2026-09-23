@@ -20,6 +20,18 @@ import {
 
 const CHROME_MAJOR = 148;
 
+/**
+ * Base64 of a UTF-8 JSON string, the way the `X-Super-Properties` header really
+ * carries it: `btoa` alone only accepts Latin-1, so a capture containing any
+ * non-ASCII character has to be encoded from its UTF-8 bytes by hand.
+ */
+function base64OfUtf8Json(value: unknown): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 describe('PROFILES registry', () => {
   it('exposes unique ids', () => {
     const ids = PROFILES.map((p) => p.id);
@@ -217,5 +229,57 @@ describe('validateCustomProfile / resolveCustom', () => {
   it('rejects an inline (non-base64) superProperties array', () => {
     const result = validateCustomProfile({ ...validInput, superProperties: [] });
     expect(result).toEqual({ ok: false, reason: 'superProperties-not-object' });
+  });
+
+  it('decodes base64 superProperties as UTF-8, so non-ASCII fields survive round-trip', () => {
+    const result = validateCustomProfile({
+      ...validInput,
+      superProperties: base64OfUtf8Json({ ...validInput.superProperties, device: 'M\u00fcnchen' }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.profile.superProperties.device).toBe('M\u00fcnchen');
+  });
+
+  it('rejects a client hint whose Chromium major contradicts the User-Agent', () => {
+    const result = validateCustomProfile({
+      ...validInput,
+      clientHints: { ...validInput.clientHints, 'Sec-CH-UA': '"Chromium";v="131"' },
+    });
+    expect(result).toEqual({ ok: false, reason: 'clientHints-version-mismatch' });
+  });
+
+  it('rejects client hints that carry no Chromium brand at all', () => {
+    const result = validateCustomProfile({
+      ...validInput,
+      clientHints: { ...validInput.clientHints, 'Sec-CH-UA': '"Not_A Brand";v="8"' },
+    });
+    expect(result).toEqual({ ok: false, reason: 'clientHints-version-mismatch' });
+  });
+
+  it('rejects a Chrome super-properties block whose browser_version contradicts the User-Agent', () => {
+    const result = validateCustomProfile({
+      ...validInput,
+      superProperties: { ...validInput.superProperties, browser_version: '131.0.0.0' },
+    });
+    expect(result).toEqual({ ok: false, reason: 'browser_version-mismatch' });
+  });
+
+  it('accepts an Electron-style clone whose browser_version tracks Electron, not Chrome', () => {
+    const electronUserAgent =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9166 Chrome/148.0.6723.119 Electron/33.4.11 Safari/537.36';
+    const result = validateCustomProfile({
+      ...validInput,
+      userAgent: electronUserAgent,
+      superProperties: {
+        ...validInput.superProperties,
+        browser: 'Discord Client',
+        browser_user_agent: electronUserAgent,
+        browser_version: '33.4.11',
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.profile.superProperties.browser_version).toBe('33.4.11');
   });
 });

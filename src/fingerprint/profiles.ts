@@ -185,6 +185,18 @@ function isHeaderSafeValue(value: string, maxLen: number): boolean {
   return /^[\x20-\x7E]+$/.test(value);
 }
 
+/** Leading major of a dotted version string (`"148.0.0.0"` -> 148), or undefined when it has no digit prefix. */
+function majorOf(version: string): number | undefined {
+  const match = /^(\d+)/.exec(version);
+  return match ? Number(match[1]) : undefined;
+}
+
+/** Major of the `"Chromium";v="<major>"` entry in a `Sec-CH-UA` value, or undefined when the list carries no Chromium brand. */
+function chromiumHintMajor(secChUa: string): number | undefined {
+  const match = /"Chromium";\s*v="(\d+)"/.exec(secChUa);
+  return match ? Number(match[1]) : undefined;
+}
+
 /**
  * Validate an admin-submitted custom profile. `superProperties` may be a
  * plain object or a base64 string (the same shape the real `X-Super-Properties`
@@ -204,6 +216,12 @@ function isHeaderSafeValue(value: string, maxLen: number): boolean {
  * invalid `Headers.set` call. `superProperties`' other fields are always
  * base64-encoded before they ever reach a header, so they only need the
  * type checks already below.
+ *
+ * Three fields describe the same browser version, so they must agree:
+ * `browser_user_agent` (identical to `userAgent`), the `"Chromium";v="..."` entry
+ * of `Sec-CH-UA`, and - for a `browser` of exactly `Chrome` - the
+ * `browser_version` major. A contradictory set is rejected rather than stored,
+ * since every request from that identity would carry the contradiction.
  */
 export function validateCustomProfile(input: unknown): ValidateCustomProfileResult {
   if (typeof input !== 'object' || input === null) return { ok: false, reason: 'input-not-object' };
@@ -215,9 +233,15 @@ export function validateCustomProfile(input: unknown): ValidateCustomProfileResu
 
   let rawSuperProperties: Record<string, unknown>;
   if (typeof candidate.superProperties === 'string') {
+    // The header value is base64 of the JSON's UTF-8 bytes, so `atob`'s
+    // Latin-1 string must be re-read as bytes before parsing: a capture with
+    // any non-ASCII field (an umlaut in `device`, a non-Latin `system_locale`)
+    // would otherwise be stored as mojibake and echoed back that way forever.
+    // Invalid base64, invalid UTF-8, and malformed JSON all fall back to the
+    // same documented rejection.
     let decoded: unknown;
     try {
-      decoded = JSON.parse(atob(candidate.superProperties));
+      decoded = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(candidate.superProperties), (c) => c.charCodeAt(0))));
     } catch {
       return { ok: false, reason: 'superProperties-not-object' };
     }
@@ -254,6 +278,32 @@ export function validateCustomProfile(input: unknown): ValidateCustomProfileResu
     !isHeaderSafeValue(hints['Sec-CH-UA-Platform'], 64)
   ) {
     return { ok: false, reason: 'clientHints-missing' };
+  }
+
+  // A capture whose `User-Agent` claims Chrome/148 but whose client hints list a
+  // different Chromium major is internally inconsistent - a real Chromium client
+  // always agrees with itself, and Discord sees both headers on every request, so
+  // the mismatch is itself a bot tell. `Chrome/<major>` is the first Chrome
+  // version token, which also matches Electron and Edge clone captures.
+  const chromeToken = /Chrome\/(\d+)/.exec(candidate.userAgent);
+  const claimedMajor = chromeToken ? Number(chromeToken[1]) : undefined;
+  if (claimedMajor !== undefined && chromiumHintMajor(hints['Sec-CH-UA']) !== claimedMajor) {
+    return { ok: false, reason: 'clientHints-version-mismatch' };
+  }
+
+  // Symmetrically, a super-properties block that calls itself `Chrome` must not
+  // report a different major in `browser_version`. Only `Chrome` is checked, and
+  // only when the capture supplied a `browser_version` at all: Discord's own
+  // desktop (Electron) builds report the Electron version under a different
+  // `browser` value, and the field is optional elsewhere in this validator.
+  const browserVersion = typeof rawSuperProperties.browser_version === 'string' ? rawSuperProperties.browser_version : '';
+  if (
+    claimedMajor !== undefined &&
+    rawSuperProperties.browser === 'Chrome' &&
+    browserVersion !== '' &&
+    majorOf(browserVersion) !== claimedMajor
+  ) {
+    return { ok: false, reason: 'browser_version-mismatch' };
   }
 
   const rawLocale = typeof candidate.locale === 'string' && candidate.locale ? candidate.locale : undefined;
