@@ -20,16 +20,17 @@
  * shift to per-slot or per-route sharding later as a one-file change.
  */
 
-import type { BuildNumberRecord } from '../fingerprint/build-number';
+import type { ClientVersionRecords } from '../fingerprint/versions';
 import type { Bindings } from '../types';
 import type {
-	AcquireResult,
-	ReleaseInput,
-	RouteKey,
-	Slot,
-	StaticFingerprintRecord,
-	StaticTokenKind,
-	TokenPoolClient,
+  AcquireResult,
+  LeaseStaticResult,
+  ReleaseInput,
+  RouteKey,
+  Slot,
+  StaticPrepareResult,
+  StaticTokenKind,
+  TokenPoolClient,
 } from './types';
 
 /** Default DO instance name. Sharding refactor swaps this constant. */
@@ -41,40 +42,47 @@ export const POOL_INSTANCE_NAME = 'token-pool-v1';
  * the single canonical instance.
  */
 export function getPoolStub(env: Bindings, _slot?: Slot): DurableObjectStub {
-	const id = env.TOKEN_POOL.idFromName(POOL_INSTANCE_NAME);
-	return env.TOKEN_POOL.get(id);
+  const id = env.TOKEN_POOL.idFromName(POOL_INSTANCE_NAME);
+  return env.TOKEN_POOL.get(id);
 }
 
 /**
  * Build a TokenPoolClient backed by the given DO stub. Each method forwards
  * to the underlying DO RPC. The DO is responsible for ordering and
- * atomicity; this wrapper is intentionally thin.
+ * atomicity (input/output gates around every storage operation); this
+ * wrapper is intentionally thin.
  *
- * The fingerprint-related methods (`getStaticFingerprint`,
- * `getBuildNumberRecord`) are present on the real client; the
+ * The static-identity guard methods (`prepareStatic`, `leaseStatic`,
+ * `settleStatic`, `getClientVersions`) are present on the real client; the
  * {@link TokenPoolClient} interface declares them optional so mock clients in
  * tests can omit them.
  */
 export function createTokenPoolClient(stub: DurableObjectStub): TokenPoolClient {
-	const rpc = stub as unknown as RpcShape;
+  const rpc = stub as unknown as RpcShape;
 
-	return {
-		acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult> {
-			return rpc.acquire(slot, routeKey, guildId);
-		},
-		acquireByLabel(label: string, slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult> {
-			return rpc.acquireByLabel(label, slot, routeKey, guildId);
-		},
-		release(label: string, requestId: string, response: ReleaseInput): Promise<void> {
-			return rpc.release(label, requestId, response);
-		},
-		getStaticFingerprint(kind: StaticTokenKind): Promise<StaticFingerprintRecord | null> {
-			return rpc.getStaticFingerprint(kind);
-		},
-		getBuildNumberRecord(): Promise<BuildNumberRecord | null> {
-			return rpc.getBuildNumberRecord();
-		},
-	};
+  return {
+    acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult> {
+      return rpc.acquire(slot, routeKey, guildId);
+    },
+    acquireByLabel(label: string, slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult> {
+      return rpc.acquireByLabel(label, slot, routeKey, guildId);
+    },
+    release(label: string, requestId: string, response: ReleaseInput): Promise<void> {
+      return rpc.release(label, requestId, response);
+    },
+    prepareStatic(identityHash: string, kind: StaticTokenKind): Promise<StaticPrepareResult> {
+      return rpc.prepareStatic(identityHash, kind);
+    },
+    leaseStatic(identityHash: string, routeKey: RouteKey): Promise<LeaseStaticResult> {
+      return rpc.leaseStatic(identityHash, routeKey);
+    },
+    settleStatic(identityHash: string, requestId: string, outcome: ReleaseInput): Promise<void> {
+      return rpc.settleStatic(identityHash, requestId, outcome);
+    },
+    getClientVersions(): Promise<ClientVersionRecords> {
+      return rpc.getClientVersions();
+    },
+  };
 }
 
 /**
@@ -83,9 +91,11 @@ export function createTokenPoolClient(stub: DurableObjectStub): TokenPoolClient 
  * shape here so the rest of the codebase doesn't need to know about the cast.
  */
 interface RpcShape {
-	acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
-	acquireByLabel(label: string, slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
-	release(label: string, requestId: string, response: ReleaseInput): Promise<void>;
-	getStaticFingerprint(kind: StaticTokenKind): Promise<StaticFingerprintRecord | null>;
-	getBuildNumberRecord(): Promise<BuildNumberRecord | null>;
+  acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
+  acquireByLabel(label: string, slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
+  release(label: string, requestId: string, response: ReleaseInput): Promise<void>;
+  prepareStatic(identityHash: string, kind: StaticTokenKind): Promise<StaticPrepareResult>;
+  leaseStatic(identityHash: string, routeKey: RouteKey): Promise<LeaseStaticResult>;
+  settleStatic(identityHash: string, requestId: string, outcome: ReleaseInput): Promise<void>;
+  getClientVersions(): Promise<ClientVersionRecords>;
 }

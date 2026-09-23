@@ -8,7 +8,7 @@
 
 /**
  * @module test/env
- * Type augmentation for the `cloudflare:test` module used by `@cloudflare/vitest-pool-workers`.
+ * Type augmentation for the `cloudflare:test` module used by `@cloudflare/vitest-plugin`.
  * Maps the test environment interface to the worker's {@link Env} bindings so that
  * `env` is correctly typed within Vitest test files.
  */

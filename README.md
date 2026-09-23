@@ -15,12 +15,12 @@ Original motivation was for my Google Sheets to be able to call the Discord API,
 - **Reverse proxy** - Forwards any request to `https://discord.com/api/v10` with automatic token injection
 - **Dual static-token slots** - Switches between bot and user tokens based on the endpoint or an explicit header. Optionally routes to a second user token (e.g. a premium alt account) when the request authenticates with `AUTH_KEY_PREMIUM`.
 - **Token rotator pool** - On allow-listed user-token paths (search, member lookups, etc.), the request acquires a token from a Durable-Object-backed pool with per-Discord-bucket cooldown tracking. Multiple registered user tokens spread the rate-limit budget transparently. Cross-Worker consumers can share the same pool via the `script_name` DO binding pattern.
-- **Per-token fingerprint hygiene** - Each user-token request carries a deterministic browser fingerprint (UA, X-Super-Properties, X-Discord-Locale, ...). Profiles are pinned per token so the same identity is consistent across rotated calls; bot requests carry the Discord-compliant `DiscordBot (...)` UA. A daily cron scrapes Discord's current web `build_number` so the embedded super-properties stay current.
-- **Admin API** - `AUTH_KEY_ADMIN`-gated sub-app at `/admin/*` for runtime pool + fingerprint management (register, list, reset, unregister, health, fingerprint profiles, static-token fingerprint mapping, build-number record). Distinct auth chain from `AUTH_KEY` / `AUTH_KEY_PREMIUM`; fail-closed when the admin secret is unset.
+- **Client identity hardening** - Every user-token request, pooled or static, carries a realistic, self-consistent, version-tracking Chromium fingerprint (`User-Agent`, `Sec-CH-UA*`, `X-Super-Properties`, `X-Discord-Locale`, `X-Discord-Timezone`, ...) composed by a single header composer; an inbound-header allowlist stops leaking `cf-connecting-ip`/`x-forwarded-for`/`cf-ipcountry` to Discord; a per-identity atomic bucket-lease guard plus captcha/Cloudflare abuse-signal circuits protect static tokens the same way the pool protects rotated ones; client-like message sends (`nonce`/`tts`/`flags` fill, opt-in typing indicator, `X-Context-Properties`). See [Client Identity](#client-identity) below.
+- **Admin API** - `AUTH_KEY_ADMIN`-gated sub-app at `/admin/*` for runtime pool + fingerprint + identity management (register, list, reset, unregister, health, fingerprint profiles, static-token fingerprint mapping incl. operator-captured clone profiles, client-versions record, identity preview). Distinct auth chain from `AUTH_KEY` / `AUTH_KEY_PREMIUM`; fail-closed when the admin secret is unset.
 - **Public healthcheck** - Unauthenticated `GET /healthcheck` returning service status, build hash, and UTC timestamps. Mounted before the sieve so phone browsers, status pages, and uptime monitors can hit it without a key.
 - **Snowflake validation** - Validates Discord IDs in URL paths before forwarding, returning Discord-compatible error responses
-- **Rate limit interception** - Reformats 429 responses into a consistent JSON envelope
-- **Custom endpoints** - Server-specific business logic that processes Discord data server-side
+- **Rate limit interception** - Reformats 429 responses into a consistent JSON envelope, preserving `X-Proxy-*` guard signals
+- **Custom endpoints** - Server-specific business logic that processes Discord data server-side, sharing the same paced pager and header composer as the proxy
 - **OpenAPI spec** - Auto-generated via `@hono/zod-openapi` with Swagger UI (admin and healthcheck sub-apps are intentionally not exported to the public doc)
 
 ## Tech Stack
@@ -31,7 +31,7 @@ Original motivation was for my Google Sheets to be able to call the Discord API,
 | Framework        | [Hono](https://hono.dev) + `@hono/zod-openapi` |
 | Language         | TypeScript (strict mode)                       |
 | Validation       | Zod                                            |
-| Testing          | Vitest + `@cloudflare/vitest-pool-workers`     |
+| Testing          | Vitest + `@cloudflare/vitest-plugin`           |
 | Package Manager  | Bun                                            |
 
 ## Getting Started
@@ -96,10 +96,10 @@ Request
   |
   +-- /healthcheck --> Public liveness probe (no auth, returns build metadata)
   |
-  +-- /admin/*     --> AUTH_KEY_ADMIN-gated sub-app (token pool management)
+  +-- /admin/*     --> AUTH_KEY_ADMIN-gated sub-app (token pool + identity management)
   |
   v
-[Rate Limit Interceptor]  Reformats 429 responses (post-processing)
+[Rate Limit Interceptor]  Reformats 429 responses (post-processing), preserving X-Proxy-* guard signals
   |
   v
 [Auth Middleware]          Validates x-auth-key or Authorization (AUTH_KEY / AUTH_KEY_PREMIUM); sets authSlot
@@ -108,19 +108,26 @@ Request
 [Discord Context]          Selects bot/user static token + records discordTokenKind based on authSlot
   |
   v
-[Token Rotator]            On allow-listed user-token paths, acquires a token + fingerprint from the DO pool
+[Snowflake Validator]      Validates Discord IDs in URL path segments (before identity resolution, so a malformed
+                            path never costs a Durable Object round trip)
   |
   v
-[Snowflake Validator]      Validates Discord IDs in URL path segments
+[Identity Middleware]      Resolves live client versions + a fallback identity (static path); records a
+                            PoolPlan on allow-listed routes and constructs one shared StaticGuard, but never
+                            itself acquires a pool token or leases the guard - that only happens at the point
+                            of each outbound fetch
   |
   v
 [Subrequest Logger]        Wraps proxyFetch for streaming visibility
   |
   v
-[Custom Routes]            /custom/* - Business logic endpoints
+[Custom Routes]            /custom/* - Business logic endpoints, sharing the paged-messages pager + StaticGuard
   |
   v
-[Proxy Forwarder]          /* - Composes fingerprint or bot UA, forwards to discord.com/api/v10, releases the pool token after fetch
+[Proxy Forwarder]          /* - Composes the request headers (fingerprint or bot UA), fills message-send bodies,
+                            dispatches opt-in typing, forwards to discord.com/api/v10, leases/releases the
+                            pool token or static guard immediately around each dispatch, retries once on a live
+                            pool 429
 ```
 
 > [!NOTE]
@@ -136,9 +143,10 @@ For each request the proxy decides which Discord token to use:
 
 Once a user-token branch is selected:
 
-- **`AUTH_KEY` -> `default` slot**, **`AUTH_KEY_PREMIUM` -> `premium` slot.** The static token (`DISCORD_TOKEN_USER` / `DISCORD_TOKEN_USER_PREMIUM`) is the default for that slot.
-- **On allow-listed read paths** (`/guilds/:id/messages/search`, `/guilds/:id/members*`, `/channels/:id/messages*`, etc.), the token rotator middleware acquires a registered pool token in the matching slot. When no tokens are registered for the slot, the rotator falls through to the static token instead of erroring - `bun run dev` and ad-hoc extraction scripts work with zero registration.
+- **`AUTH_KEY` -> `default` slot**, **`AUTH_KEY_PREMIUM` -> `premium` slot.** The static token (`DISCORD_TOKEN_USER` / `DISCORD_TOKEN_USER_PREMIUM`) is the default for that slot, and is itself now guarded (see [Client Identity](#client-identity)) rather than dispatched bare.
+- **On allow-listed read paths** (`/guilds/:id/messages/search`, `/guilds/:id/members*`, `/channels/:id/messages*`, etc.), the proxy forwarder acquires a registered pool token in the matching slot, immediately before dispatch. When no tokens are registered for the slot, or the pool acquire falls back (`empty-pool`/`no-eligible-token`), the request falls through to the guarded static token instead of erroring - `bun run dev` and ad-hoc extraction scripts work with zero registration.
 - **Premium pool isolation.** `default` consumers never see `premium` tokens and vice versa - premium tokens are handpicked higher-access accounts, not a throughput tier.
+- **Message authorship stays static-only.** `POST /channels/:id/messages` never rotates through the pool regardless of `X-Proxy-Token`, so every message sent by a given slot always carries the same identity.
 
 #### Per-request override: `X-Proxy-Token`
 
@@ -147,20 +155,29 @@ Override the default LRU selection on a per-request basis with an optional `X-Pr
 | Value | Behavior |
 |---|---|
 | absent / `auto` | Default LRU rotation across registered pool tokens (current behavior) |
-| `static` | Skip the rotator entirely - use the static `DISCORD_TOKEN_USER` / `DISCORD_TOKEN_USER_PREMIUM` on context |
+| `static` | Skip the pool entirely - use the guarded static `DISCORD_TOKEN_USER` / `DISCORD_TOKEN_USER_PREMIUM` on context |
 | `<label>` | Pin to that specific registered pool token via `acquireByLabel`. Returns 503 if the label is missing, status is not active, or the slot mismatches; returns 429 if the labeled token is in cooldown |
 
-The header is consumed by the rotator middleware and stripped before the request is forwarded to Discord. Auth-gated by the existing `AUTH_KEY` chain; no separate admin auth needed. Use cases: pin a specific token for debugging which one is misbehaving, force-bypass the pool for predictable extraction with the static token, or run `bun run dev` against a single registered local token.
+The header is consumed by the identity middleware and stripped before the request is forwarded to Discord. Auth-gated by the existing `AUTH_KEY` chain; no separate admin auth needed. Use cases: pin a specific token for debugging which one is misbehaving, force-bypass the pool for predictable extraction with the static token, or run `bun run dev` against a single registered local token.
 
-### Fingerprint Hygiene
+#### Opt-in typing indicator: `X-Proxy-Typing`
 
-Each user-token request is decorated with a consistent browser fingerprint header set composed from the assigned profile + current Discord client `build_number`:
+Set `X-Proxy-Typing: on` on a `POST /channels/:id/messages` request (with a non-empty `content`) to have the proxy dispatch a `POST .../typing` call first, then wait a humanized delay (`600ms + 55ms/char`, clamped 1-4s, plus jitter) before the actual send - the same rhythm a real client exhibits when a human types a reply. Default is off; the header is stripped before forwarding either way. If the identity is guard-blocked for the typing dispatch, typing is silently skipped (no wait) and the main send still proceeds through its own guard check.
 
-- `User-Agent`, `X-Super-Properties` (base64 JSON), `X-Discord-Locale`, `X-Debug-Options`, `Accept`, `Accept-Language`, `Origin`, `Referer`.
-- **Pool tokens.** Each registered token is assigned a profile id on first `acquire()` via a stable hash of its label. The assignment is persisted, so a token's identity is consistent across rotated calls and across cold starts. Operators can override the assignment via `POST /admin/tokens/:label/fingerprint`.
-- **Static tokens.** `DISCORD_TOKEN_USER` and `DISCORD_TOKEN_USER_PREMIUM` get their own fingerprint identity via `POST /admin/static-fingerprint { kind, profileId }`. The mapping is stored in the same Durable Object as the pool.
-- **Bot tokens** carry only `User-Agent: DiscordBot (https://github.com/Synertry/discord-api-proxy, <build hash>)` per Discord's API docs; no super-properties.
-- **Build number.** A daily cron (`0 4 * * *` UTC) scrapes `discord.com/login` and persists the current `build_number` to the DO. Stale records (>7 days) fall back to a hardcoded constant. Manual refresh: `POST /admin/build-number/refresh`.
+## Client Identity
+
+Every user-token request - whether served by a pool token or the guarded static token - is composed by a single function, `composeRequestHeaders`, so there is exactly one place that decides what a request looks like to Discord:
+
+- **Header set.** `User-Agent`, `Sec-CH-UA` / `Sec-CH-UA-Mobile` / `Sec-CH-UA-Platform`, `X-Super-Properties` (base64 JSON), `X-Discord-Locale`, `X-Discord-Timezone`, `X-Debug-Options`, `Priority`, `Accept*`, `Origin`, `Referer`. Bot tokens carry only `User-Agent: DiscordBot (https://github.com/Synertry/discord-api-proxy, <build hash>)` per Discord's API docs, no super-properties.
+- **Inbound allowlist.** Only an explicit allowlist of inbound headers is ever forwarded (`Custom-Client-Header`-style ad hoc headers, `cf-connecting-ip`, `x-forwarded-for`, `cf-ipcountry`, the caller's own `User-Agent`, etc. are all dropped); `Authorization` is always set last so nothing forwarded upstream of it can ever win.
+- **Version tracking.** Generated Chromium profiles derive their User-Agent/client hints/super-properties from a daily-scraped Chrome stable major and Discord web `build_number` (`POST /admin/client-versions/refresh`, cron `0 4 * * *` UTC). Stale records fall back to a hardcoded constant.
+- **Session determinism.** Per-identity session fields (`client_launch_id`, `client_heartbeat_session_id`, `launch_signature`) are derived deterministically from the identity key and a time bucket, so repeated calls within a session window look like the same live client, not a fresh login every request.
+- **Pool tokens.** Each registered token is assigned a profile id on first `acquire()` via a stable hash of its label; the assignment persists across cold starts. Operators can override via `POST /admin/tokens/:label/fingerprint`.
+- **Static tokens.** `DISCORD_TOKEN_USER` and `DISCORD_TOKEN_USER_PREMIUM` get their own fingerprint identity via `POST /admin/static-fingerprint { kind, profileId }` (a known template) or `{ kind, custom }` (an operator-captured clone of a real client's headers). Custom profiles let a static token look exactly like the operator's real desktop/mobile client instead of a generated template.
+- **Identity guard.** Static tokens are protected by the same class of per-bucket budget tracking the pool uses, plus abuse-signal circuits, both independent of ordinary bucket cooldowns: a captcha challenge in a response body opens a 30-minute circuit on that identity, and a Cloudflare edge block opens a 10-minute circuit on every identity at once (they share one egress IP). A blocked request never reaches Discord - it gets a 429 with `X-Proxy-Block: bucket|capacity|captcha|cloudflare` instead. The guard leases atomically immediately before each dispatch and settles immediately after, so concurrent requests on the same identity never oversubscribe its budget.
+- **Message sends look like a client, not a bot script.** `POST /channels/:id/messages` on a user-token JSON body gets `nonce` (Discord snowflake), `tts: false`, and `flags: 0` filled in when absent (never overwriting a caller-supplied value), plus a default `X-Context-Properties` value (also set on `POST /users/@me/channels`). Bodies of 64 KiB or more stream through unmodified. Combine with `X-Proxy-Typing: on` for the full send-with-typing sequence.
+- **Upstream API version.** Every path - bot and user-token alike - stays on `/api/v10`, unchanged. This is a deliberate operator decision: the official Discord developer reference lists both v9 and v10 as "Available" with no user-token-specific guidance, and this project follows that reference rather than the live web client's/Vencord's/discord.py-self's undocumented internal use of v9. API version and client-emulation headers are independent axes; nothing above changes the version.
+- **Accepted gaps.** TLS JA3/JA4 fingerprinting, HTTP/2 frame ordering, and the Worker's own egress IP are not emulable from a Cloudflare Worker and are not attempted. Cross-zone Worker subrequests always add `CF-Worker: <zone>` and set `CF-Connecting-IP` to the Worker's own client IP; both are Cloudflare platform behavior, not removable.
 
 ### Project Structure
 
@@ -171,40 +188,55 @@ src/
   global.d.ts                 Build-time constants (BUILD_HASH, BUILD_TIMESTAMP)
   middleware/
     auth.ts                   API key authentication (sets authSlot)
-    discord-context.ts        Static-token selection + discordTokenKind; looks up static fingerprint
-    token-rotator.ts          Pool acquire on allow-listed rotatable paths
+    discord-context.ts        Static-token selection + discordTokenKind
+    identity.ts                Resolves versions/fallback identity/PoolPlan/StaticGuard; never acquires/leases itself
     subrequest-logger.ts      Wraps proxyFetch for streaming visibility
     snowflake-validator.ts    Discord ID format validation
   routes/
-    proxy.ts                  Catch-all reverse proxy; composes fingerprint or bot UA, releases pool token post-fetch
+    proxy.ts                  Catch-all reverse proxy; composes headers, fills message bodies, dispatches
+                               opt-in typing, leases/releases at the point of each outbound fetch, retries
+                               once on a live pool 429
     custom.ts                 Custom business logic route tree
-    admin.ts                  AUTH_KEY_ADMIN sub-app (token pool + fingerprint management)
+    admin.ts                  AUTH_KEY_ADMIN sub-app (token pool, fingerprint, and identity management)
     healthcheck.ts            Public unauthenticated liveness probe
   rotator/
-    do.ts                     TokenPoolDO Durable Object class + RPC methods
-    types.ts                  TokenState, AcquireResult, ReleaseInput, etc.
-    bucket.ts                 Route -> Discord-bucket lookup
+    do.ts                     TokenPoolDO Durable Object class + RPC methods (pool + static-guard)
+    types.ts                  TokenState, StaticIdentityState, AcquireResult, ReleaseInput, etc.
+    budget.ts                 Pure BucketBudget/lease/circuit-precedence logic shared by pool and static guard
+    static-guard.ts           StaticGuard: lease-at-point-of-use wrapper over leaseStatic/settleStatic
+    bucket.ts                 Route -> Discord-bucket lookup + rotatable-route allowlist
     selection.ts              Pure LRU + cooldown filtering
-    validators.ts             Token format + pool-cap + bucket-states housekeeping
+    signals.ts                inspectResponse: parses X-RateLimit-*, captcha/Cloudflare abuse signals
+    token-hash.ts              Hashes a token secret into the guard's identity key (kind-independent)
     release-input.ts          Parse X-RateLimit-* response headers
+    validators.ts             Token format + pool-cap + bucket-states housekeeping
     client.ts                 createTokenPoolClient(stub) + getPoolStub(env) factory
   fingerprint/                Pure, runtime-agnostic
-    profiles.ts               FingerprintProfile registry + FALLBACK_PROFILE_ID
-    compose.ts                composeFingerprint + composeBotUserAgent (pure)
-    build-number.ts           selectBuildNumber (pure) + isolated DO read helper
+    profiles.ts               ProfileTemplate/ResolvedProfile registry, FALLBACK_PROFILE_ID, custom-profile validation
+    chromium.ts                Generated Chromium UA/client-hint templates + greased Sec-CH-UA brand list
+    session.ts                 Deterministic per-identity session field derivation
+    compose.ts                 composeFingerprint + composeBotUserAgent (pure)
+    headers.ts                 composeRequestHeaders: the single header composer + inbound allowlist
+    versions.ts                 ClientVersions resolution (build number + Chrome major, with staleness fallback)
+    context-properties.ts      X-Context-Properties defaults per route
+    hash.ts                    Shared hashing helper
   scheduled/
-    build-number-refresh.ts   Daily cron handler scraping discord.com/login
+    client-versions-refresh.ts Daily cron handler: dual independent scrape (build number, Chrome major)
   custom/
+    shared/
+      paged-messages.ts        Shared paced pager: cursor pagination + guard lease-at-point-of-use + 429 retry
     chillzone/events/
-      bingo/                  Bingo participant counts (uses the rotator)
+      bingo/                  Bingo participant counts (own pool client with acquire-backoff + live-429 retry)
       kindness-cascade/       Kindness Cascade tallying module (see its own README)
 
 test/
   env.d.ts                    Cloudflare test type augmentation
-  middleware/                 Unit tests for each middleware (incl. token-rotator)
+  middleware/                 Unit tests for each middleware
   routes/                     Integration tests for proxy, custom, admin, healthcheck
-  rotator/                    DO + pure-function tests via @cloudflare/vitest-pool-workers
-  custom/chillzone/events/    Classifier, tallier, formatter, and handler tests
+  rotator/                    DO + pure-function tests via @cloudflare/vitest-plugin
+  fingerprint/                Header composer, profile registry, session, versions tests
+  custom/                     Shared pager + per-event classifier/tallier/formatter/handler tests
+  scheduled/                  Client-versions refresh (independent persistence of both records)
 ```
 
 ## Custom Endpoints
@@ -231,11 +263,11 @@ Returns `{ "tally": 0 }`. Placeholder for now. Not yet imported from my private 
 ## Testing
 
 ```bash
-bun run test           # Run all 348 tests across 29 suites
+bun run test           # Run all 688 tests across 43 suites
 bun run test -- --ui   # Open Vitest UI
 ```
 
-Tests use `@cloudflare/vitest-pool-workers` to run in a Workers-compatible runtime. Discord API calls are mocked at the fetch level. `TokenPoolDO` runs in the real DO simulation; tests inject either a mock pool client (`createApp(mockFetch, mockTokenPool)`) or exercise the DO directly via `runInDurableObject`.
+Tests use `@cloudflare/vitest-plugin` to run in a Workers-compatible runtime. Discord API calls are mocked at the fetch level. `TokenPoolDO` runs in the real DO simulation; tests inject either a mock pool client (`createApp(mockFetch, mockTokenPool)`) or exercise the DO directly via `runInDurableObject`.
 
 ## Deployment
 

@@ -24,66 +24,72 @@ const snowflakeSchema = z.string().regex(/^\d{17,20}$/, 'Must be a valid Discord
  * - `formattedMessage`: when `'true'`, returns Discord-formatted `text/plain` instead of JSON
  */
 export const hearMeOutQuerySchema = z.object({
-	guildId: snowflakeSchema,
-	channelId: snowflakeSchema,
-	all: z.enum(['true', 'false']).optional().default('false'),
-	formattedMessage: z.enum(['true', 'false']).optional().default('false'),
+  guildId: snowflakeSchema,
+  channelId: snowflakeSchema,
+  all: z.enum(['true', 'false']).optional().default('false'),
+  formattedMessage: z.enum(['true', 'false']).optional().default('false'),
 });
 
 const userEntitySchema = z.object({
-	userId: z.string(),
-	username: z.string(),
+  userId: z.string(),
+  username: z.string(),
 });
 
 const userTallySchema = z.object({
-	userId: z.string(),
-	username: z.string(),
-	count: z.number(),
+  userId: z.string(),
+  username: z.string(),
+  count: z.number(),
 });
 
 const submissionClassificationSchema = z.enum(['canonical', 'non-default', 'formatting-error', 'missing-attribution']);
 
 const submissionEntrySchema = z.object({
-	messageId: z.string(),
-	messageLink: z.string(),
-	submitter: userEntitySchema.nullable(),
-	messenger: userEntitySchema,
-	reactionCount: z.number(),
-	classification: submissionClassificationSchema,
-	deviationReason: z.string().nullable(),
+  messageId: z.string(),
+  messageLink: z.string(),
+  submitter: userEntitySchema.nullable(),
+  messenger: userEntitySchema,
+  reactionCount: z.number(),
+  classification: submissionClassificationSchema,
+  deviationReason: z.string().nullable(),
 });
 
 const statsSchema = z.object({
-	totalMessages: z.number(),
-	totalCanonical: z.number(),
-	totalNonDefault: z.number(),
-	totalFormattingErrors: z.number(),
-	totalMissingAttribution: z.number(),
-	totalMissingVotes: z.number(),
-	totalReactions: z.number(),
-	uniqueSubmitters: z.number(),
-	uniqueMessengers: z.number(),
+  totalMessages: z.number(),
+  totalCanonical: z.number(),
+  totalNonDefault: z.number(),
+  totalFormattingErrors: z.number(),
+  totalMissingAttribution: z.number(),
+  totalMissingVotes: z.number(),
+  totalReactions: z.number(),
+  uniqueSubmitters: z.number(),
+  uniqueMessengers: z.number(),
 });
 
 /** Full JSON response schema for the Hear Me Out tallying endpoint. */
 export const hearMeOutResponseSchema = z.object({
-	ranked: z.object({
-		topVotedSubmissions: z.array(submissionEntrySchema),
-		mostSubmissions: z.array(userTallySchema),
-		topVotedSubmitters: z.array(userTallySchema),
-		messengerActivity: z.array(userTallySchema),
-	}),
-	listings: z.object({
-		nonDefault: z.array(submissionEntrySchema),
-		formattingErrors: z.array(submissionEntrySchema),
-		missingAttribution: z.array(submissionEntrySchema),
-		missingVotes: z.array(submissionEntrySchema),
-		counts: z.record(z.string(), z.number()),
-	}),
-	stats: statsSchema,
+  ranked: z.object({
+    topVotedSubmissions: z.array(submissionEntrySchema),
+    mostSubmissions: z.array(userTallySchema),
+    topVotedSubmitters: z.array(userTallySchema),
+    messengerActivity: z.array(userTallySchema),
+  }),
+  listings: z.object({
+    nonDefault: z.array(submissionEntrySchema),
+    formattingErrors: z.array(submissionEntrySchema),
+    missingAttribution: z.array(submissionEntrySchema),
+    missingVotes: z.array(submissionEntrySchema),
+    counts: z.record(z.string(), z.number()),
+  }),
+  stats: statsSchema,
 });
 
 /** Error response schema used for 400 and 502 responses. */
 export const errorResponseSchema = z.object({
-	error: z.string(),
+  error: z.string(),
+});
+
+/** Response schema for a pre-emptive identity-guard block (429), matching `rotator/static-guard.ts`'s `blockResponse` body shape. */
+export const rateLimitResponseSchema = z.object({
+  error: z.string(),
+  retryAfter: z.number(),
 });

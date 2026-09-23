@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { deriveRouteKey, isRotatableRoute, extractGuildId } from '../../src/rotator/bucket';
+import { deriveRouteKey, deriveBudgetKey, topLevelResource, isRotatableRoute, extractGuildId } from '../../src/rotator/bucket';
 
 describe('deriveRouteKey', () => {
 	it('replaces snowflakes with :id and uppercases the method', () => {
@@ -60,6 +60,71 @@ describe('deriveRouteKey', () => {
 		expect(deriveRouteKey('GET', '/channels/123456789012345678/threads/archived/public')).toBe(
 			'GET:/channels/:id/threads/archived/public',
 		);
+	});
+});
+
+describe('deriveBudgetKey', () => {
+	it('keeps the channel id literal while normalizing the message id', () => {
+		expect(deriveBudgetKey('GET', '/channels/123456789012345678/messages/223456789012345678')).toBe(
+			'GET:/channels/123456789012345678/messages/:id',
+		);
+	});
+
+	it('keeps the guild id literal', () => {
+		expect(deriveBudgetKey('GET', '/guilds/219564597349318656/messages/search')).toBe(
+			'GET:/guilds/219564597349318656/messages/search',
+		);
+	});
+
+	it('never keeps a webhook token in either key (it is a credential; keys are persisted and logged)', () => {
+		const path = '/webhooks/123456789012345678/AbCdEf-GhI/messages/223456789012345678';
+		expect(deriveBudgetKey('POST', path)).toBe('POST:/webhooks/123456789012345678/:token/messages/:id');
+		expect(deriveRouteKey('POST', path)).toBe('POST:/webhooks/:id/:token/messages/:id');
+		expect(deriveBudgetKey('POST', path).toLowerCase()).not.toContain('abcdef');
+		expect(deriveRouteKey('POST', path).toLowerCase()).not.toContain('abcdef');
+	});
+
+	it('keeps the top-level id when the resource segment is not lowercase, so scoping still applies', () => {
+		const key = deriveBudgetKey('GET', '/Channels/123456789012345678/messages');
+		expect(key).toBe('GET:/channels/123456789012345678/messages');
+		expect(topLevelResource(key)).toBe('channels/123456789012345678');
+	});
+
+	it('keeps the channel id for the typing route so it scopes to that channel', () => {
+		expect(deriveBudgetKey('POST', '/channels/123456789012345678/typing')).toBe('POST:/channels/123456789012345678/typing');
+	});
+
+	it.each([
+		['GET', '/users/@me'],
+		['GET', '/users/123456789012345678'],
+		['GET', '/guilds/not-a-snowflake/messages'],
+		['GET', '/api/v10/channels/123456789012345678/messages'],
+		['GET', '/invites/abcdef'],
+	])('normalizes %s %s exactly like deriveRouteKey when there is no literal top-level id to keep', (method, path) => {
+		expect(deriveBudgetKey(method, path)).toBe(deriveRouteKey(method, path));
+	});
+
+	it('strips query strings before normalizing', () => {
+		expect(deriveBudgetKey('GET', '/guilds/219564597349318656/messages/search?author_id=999')).toBe(
+			'GET:/guilds/219564597349318656/messages/search',
+		);
+	});
+});
+
+describe('topLevelResource', () => {
+	it('returns the literal top-level resource of a budget key', () => {
+		expect(topLevelResource('GET:/channels/123456789012345678/messages/:id')).toBe('channels/123456789012345678');
+		expect(topLevelResource('GET:/guilds/219564597349318656/messages/search')).toBe('guilds/219564597349318656');
+		expect(topLevelResource('POST:/webhooks/123456789012345678/:token/messages/:id')).toBe('webhooks/123456789012345678');
+	});
+
+	it.each([
+		['a normalized route key', 'GET:/channels/:id/messages'],
+		['a non-resource path', 'GET:/users/@me'],
+		['a resource path with a non-snowflake id', 'GET:/guilds/foo/messages'],
+		['a methodless key', '/guilds/219564597349318656/messages'],
+	])('returns undefined for %s', (_label, key) => {
+		expect(topLevelResource(key)).toBeUndefined();
 	});
 });
 

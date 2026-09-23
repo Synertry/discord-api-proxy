@@ -82,7 +82,9 @@ describe('proxy + rotator integration', () => {
 			label: 'tok-1',
 			requestId: 'req-1',
 			status: 200,
-			routeKey: 'GET:/guilds/:id/messages/search',
+			// The budget key (`deriveBudgetKey`), which keeps the literal guild
+			// id - the acquire above used the same key.
+			routeKey: 'GET:/guilds/219564597349318656/messages/search',
 		});
 	});
 
@@ -123,10 +125,19 @@ describe('proxy + rotator integration', () => {
 		expect(headersA.get('Authorization')).toBe('POOLED_1');
 		expect(headersB.get('Authorization')).toBe('POOLED_2');
 
-		// Both releases happened with their respective requestIds
+		// Both releases happened with their respective requestIds, each under
+		// the same budget key its acquire used.
 		expect(pool.releases).toHaveLength(2);
-		expect(pool.releases[0]).toMatchObject({ label: 'tok-1', status: 429 });
-		expect(pool.releases[1]).toMatchObject({ label: 'tok-2', status: 200 });
+		expect(pool.releases[0]).toMatchObject({
+			label: 'tok-1',
+			status: 429,
+			routeKey: 'GET:/guilds/219564597349318656/messages/search',
+		});
+		expect(pool.releases[1]).toMatchObject({
+			label: 'tok-2',
+			status: 200,
+			routeKey: 'GET:/guilds/219564597349318656/messages/search',
+		});
 	});
 
 	it('passes the original 429 through when retry acquire reports cooldown', async () => {

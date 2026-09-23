@@ -34,54 +34,23 @@ import type { ReleaseInput, RouteKey } from './types';
  * carry the request method.
  */
 export function extractReleaseInput(response: Response, routeKey: RouteKey, guildId?: string): ReleaseInput {
-	const headers = response.headers;
-	const bucket = headers.get('X-RateLimit-Bucket') ?? undefined;
-	const remainingStr = headers.get('X-RateLimit-Remaining');
-	const resetAfterStr = headers.get('X-RateLimit-Reset-After');
-	const retryAfterStr = headers.get('Retry-After');
+  const headers = response.headers;
+  const bucket = headers.get('X-RateLimit-Bucket') ?? undefined;
+  const remainingStr = headers.get('X-RateLimit-Remaining');
+  const resetAfterStr = headers.get('X-RateLimit-Reset-After');
+  const retryAfterStr = headers.get('Retry-After');
 
-	const remaining = remainingStr !== null ? parseInt(remainingStr, 10) : undefined;
-	const resetAfterSec = resetAfterStr !== null ? parseFloat(resetAfterStr) : undefined;
-	const retryAfterSec = retryAfterStr !== null ? parseFloat(retryAfterStr) : undefined;
+  const remaining = remainingStr !== null ? parseInt(remainingStr, 10) : undefined;
+  const resetAfterSec = resetAfterStr !== null ? parseFloat(resetAfterStr) : undefined;
+  const retryAfterSec = retryAfterStr !== null ? parseFloat(retryAfterStr) : undefined;
 
-	return {
-		status: response.status,
-		routeKey,
-		discordBucketHash: bucket,
-		remaining: Number.isFinite(remaining) ? remaining : undefined,
-		resetAfterMs: Number.isFinite(resetAfterSec) ? Math.round(resetAfterSec! * 1000) : undefined,
-		retryAfterMs: Number.isFinite(retryAfterSec) ? Math.round(retryAfterSec! * 1000) : undefined,
-		guildId,
-	};
-}
-
-/**
- * Async variant for paths that want to parse a 50001 from the response body
- * to populate `code` (so the DO can mark the token ineligible for the guild).
- *
- * Caller responsibility: only invoke when status is 403 and you're willing to
- * consume the body (clones the response first to keep the original readable).
- */
-export async function extractReleaseInputWithBody(
-	response: Response,
-	routeKey: RouteKey,
-	guildId?: string,
-): Promise<ReleaseInput> {
-	const base = extractReleaseInput(response, routeKey, guildId);
-	if (response.status !== 403) return base;
-
-	try {
-		const clone = response.clone();
-		const text = await clone.text();
-		if (text.length === 0) return base;
-		const body = JSON.parse(text) as { code?: number };
-		if (typeof body?.code === 'number') {
-			return { ...base, code: body.code };
-		}
-	} catch (err: unknown) {
-		// Body parse failed - surface the base ReleaseInput, drop the code.
-		// Logging would leak the body; keep silent at this layer.
-		void err;
-	}
-	return base;
+  return {
+    status: response.status,
+    routeKey,
+    discordBucketHash: bucket,
+    remaining: Number.isFinite(remaining) ? remaining : undefined,
+    resetAfterMs: Number.isFinite(resetAfterSec) ? Math.round(resetAfterSec! * 1000) : undefined,
+    retryAfterMs: Number.isFinite(retryAfterSec) ? Math.round(retryAfterSec! * 1000) : undefined,
+    guildId,
+  };
 }
