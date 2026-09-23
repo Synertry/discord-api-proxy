@@ -169,7 +169,9 @@ describe('fetchAllMessages: guard lease/settle', () => {
         new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json', 'X-RateLimit-Bucket': 'b1' } }),
     );
     await fetchAllMessages<TestMessage>(baseOpts({ fetcher: mockFetch as unknown as typeof fetch, guard: { lease, settle } }));
-    expect(lease).toHaveBeenCalledWith('GET:/channels/:id/messages');
+    // The budget key keeps the channel snowflake literal, so each channel's
+    // dump leases its own per-channel budget rather than a shared :id bucket.
+    expect(lease).toHaveBeenCalledWith(`GET:/channels/${CHANNEL_ID}/messages`);
     expect(settle).toHaveBeenCalledWith('lease-1', expect.objectContaining({ status: 200, discordBucketHash: 'b1' }));
   });
 
@@ -183,6 +185,25 @@ describe('fetchAllMessages: guard lease/settle', () => {
       fetchAllMessages<TestMessage>(baseOpts({ fetcher: mockFetch as unknown as typeof fetch, guard: { lease, settle } })),
     ).rejects.toThrow(DiscordApiError);
     expect(settle).toHaveBeenCalledWith('lease-err', expect.objectContaining({ status: 599 }));
+  });
+
+  it('attempts a terminal 599 settle and rethrows when settling a successful page fails', async () => {
+    // Without the cleanup, a rejected settle strands the lease until its TTL
+    // and the caller learns nothing; the 599 fallback releases it immediately.
+    const lease = vi.fn(async () => ({ ok: true as const, requestId: 'lease-fail' }));
+    const settle = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        throw new Error('settle RPC failed');
+      })
+      .mockImplementationOnce(async () => undefined);
+    const mockFetch = createMockFetch([generateMessages(5)]);
+    await expect(
+      fetchAllMessages<TestMessage>(baseOpts({ fetcher: mockFetch as unknown as typeof fetch, guard: { lease, settle } })),
+    ).rejects.toThrow('settle RPC failed');
+    expect(settle).toHaveBeenCalledTimes(2);
+    expect(settle).toHaveBeenNthCalledWith(1, 'lease-fail', expect.objectContaining({ status: 200 }));
+    expect(settle).toHaveBeenNthCalledWith(2, 'lease-fail', expect.objectContaining({ status: 599 }));
   });
 
   it('waits out one short block (<= 5000ms) and retries the lease once', async () => {
@@ -260,6 +281,24 @@ describe('fetchAllMessages: 429 retry', () => {
     );
     // MAX_429_RETRIES=3 -> 4 total attempts (1 initial + 3 retries).
     expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it('fails fast with a 429 and never waits when Retry-After exceeds the retry cap', async () => {
+    // Retry-After 600s -> retryDelayMs ~900000ms, far past the 15000ms cap.
+    // Waiting it out would stall the whole dump for minutes, so the pager must
+    // surface the 429 instead of sleeping.
+    const mockFetch = vi.fn(async () => new Response('Rate limited', { status: 429, headers: { 'Retry-After': '600' } }));
+    const wait = vi.fn(async () => undefined);
+    let caught: unknown;
+    try {
+      await fetchAllMessages<TestMessage>(baseOpts({ fetcher: mockFetch as unknown as typeof fetch, wait }));
+    } catch (err: unknown) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(DiscordApiError);
+    expect((caught as DiscordApiError).status).toBe(429);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(wait).not.toHaveBeenCalled();
   });
 
   it('paces the NEXT page off the retry dispatch time, not the pre-retry timestamp', async () => {

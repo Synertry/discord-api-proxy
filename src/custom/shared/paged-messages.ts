@@ -30,22 +30,24 @@
  * pages of the same channel dump, so there is no need to recompose per page.
  */
 
+import { deriveBudgetKey } from '../../rotator/bucket';
 import { retryDelayMs } from '../../rotator/budget';
 import { inspectResponse } from '../../rotator/signals';
 import { IdentityBlockedError } from '../../rotator/static-guard';
 import type { StaticGuard } from '../../rotator/static-guard';
-import type { RouteKey } from '../../rotator/types';
+import type { ReleaseInput, RouteKey } from '../../rotator/types';
 
 export { IdentityBlockedError } from '../../rotator/static-guard';
 
 const DISCORD_API_BASE = 'https://discord.com/api/v10';
-const MESSAGES_ROUTE: RouteKey = 'GET:/channels/:id/messages';
 const DEFAULT_MIN_GAP_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 60_000;
 /** Cap on retrying a guard block by waiting it out - a longer block (a captcha circuit, for instance) should fail fast instead of stalling the whole channel dump. */
 const MAX_BLOCK_WAIT_MS = 5000;
 /** Cap on retrying a live Discord 429 for one page before giving up. */
 const MAX_429_RETRIES = 3;
+/** Longest live-429 Retry-After worth waiting out. A minute-plus bench (a suspicious-activity cooldown) should fail the dump fast rather than stall a request for that long. */
+const MAX_429_RETRY_WAIT_MS = 15_000;
 
 const defaultWait = (ms: number): Promise<void> => {
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -142,8 +144,9 @@ interface PageResult<T> {
 
 /** Fetch and parse one page, leasing the guard immediately before and settling immediately after, with 429 and guard-block retry. */
 async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOptions, wait: (ms: number) => Promise<void>): Promise<PageResult<T>> {
+  const budgetRouteKey = deriveBudgetKey('GET', `/channels/${opts.channelId}/messages`);
   for (let attempt429 = 0; attempt429 <= MAX_429_RETRIES; attempt429++) {
-    const lease = await leaseWithOneRetry(opts.guard, wait);
+    const lease = await leaseWithOneRetry(opts.guard, budgetRouteKey, wait);
     const dispatchedAt = Date.now();
 
     let response: Response;
@@ -155,7 +158,7 @@ async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOpti
       });
     } catch (err: unknown) {
       if (lease) {
-        await opts.guard?.settle(lease.requestId, { status: 599, routeKey: MESSAGES_ROUTE }).catch((cleanupErr: unknown) => {
+        await opts.guard?.settle(lease.requestId, { status: 599, routeKey: budgetRouteKey }).catch((cleanupErr: unknown) => {
           console.error('paged-messages guard cleanup failed:', cleanupErr);
         });
       }
@@ -163,13 +166,31 @@ async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOpti
       throw new DiscordApiError(0, `Network error: ${message}`);
     }
 
-    const outcome = await inspectResponse(response, MESSAGES_ROUTE);
+    let outcome: ReleaseInput;
     if (lease) {
-      await opts.guard?.settle(lease.requestId, outcome);
+      // Inspection and settle share one try: a rejected settle would otherwise
+      // strand the lease until its TTL, so on failure attempt a terminal 599
+      // settle (never a second outcome settle) and still rethrow the original
+      // error.
+      try {
+        outcome = await inspectResponse(response, budgetRouteKey);
+        await opts.guard?.settle(lease.requestId, outcome);
+      } catch (err: unknown) {
+        await opts.guard?.settle(lease.requestId, { status: 599, routeKey: budgetRouteKey }).catch((cleanupErr: unknown) => {
+          console.error('paged-messages guard cleanup failed:', cleanupErr);
+        });
+        throw err;
+      }
+    } else {
+      outcome = await inspectResponse(response, budgetRouteKey);
     }
 
     if (response.status === 429 && attempt429 < MAX_429_RETRIES) {
-      await wait(retryDelayMs(outcome));
+      const delay = retryDelayMs(outcome);
+      if (delay > MAX_429_RETRY_WAIT_MS) {
+        throw new DiscordApiError(429, `Retry-After wait of ${delay}ms exceeds the ${MAX_429_RETRY_WAIT_MS}ms retry cap`);
+      }
+      await wait(delay);
       continue;
     }
 
@@ -191,16 +212,17 @@ async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOpti
 /** Lease the guard, waiting out one short block (<= MAX_BLOCK_WAIT_MS) and retrying once; a longer or repeated block throws. Returns undefined when there is no guard at all (static path stays first-class with zero DO binding). */
 async function leaseWithOneRetry(
   guard: StaticGuard | undefined,
+  routeKey: RouteKey,
   wait: (ms: number) => Promise<void>,
 ): Promise<{ requestId: string } | undefined> {
   if (!guard) return undefined;
 
-  const first = await guard.lease(MESSAGES_ROUTE);
+  const first = await guard.lease(routeKey);
   if (first.ok) return first;
   if (first.block.retryAfter > MAX_BLOCK_WAIT_MS) throw new IdentityBlockedError(first.block);
 
   await wait(first.block.retryAfter);
-  const second = await guard.lease(MESSAGES_ROUTE);
+  const second = await guard.lease(routeKey);
   if (!second.ok) throw new IdentityBlockedError(second.block);
   return second;
 }

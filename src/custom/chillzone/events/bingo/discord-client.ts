@@ -34,10 +34,10 @@ import { composeRequestHeaders } from '../../../../fingerprint/headers';
 import { resolveClientVersions } from '../../../../fingerprint/versions';
 import { resolveProfileId } from '../../../../fingerprint/profiles';
 import { CHANNELS_FUN, CHILLZONE_GUILD_ID } from './constants';
-import { deriveRouteKey } from '../../../../rotator/bucket';
+import { deriveBudgetKey } from '../../../../rotator/bucket';
 import { inspectResponse } from '../../../../rotator/signals';
 import { retryDelayMs } from '../../../../rotator/budget';
-import type { AcquireSuccess, ClientVersions, RouteKey, TokenPoolClient } from '../../../../rotator/types';
+import type { AcquireSuccess, ClientVersions, ReleaseInput, RouteKey, TokenPoolClient } from '../../../../rotator/types';
 import type { DiscordGuildMember, DiscordSearchResponse } from './types';
 
 const DISCORD_API_BASE = 'https://discord.com/api/v10';
@@ -53,6 +53,9 @@ const MAX_ACQUIRE_ATTEMPTS = 5;
 
 /** Longest single cooldown worth waiting out. Anything longer (an open captcha/Cloudflare circuit, a long bucket reset) fails fast with a 429 instead of stalling the request for minutes; mirrors the shared pager's block-wait cap. */
 const MAX_ACQUIRE_WAIT_MS = 5000;
+
+/** Longest live-429 Retry-After worth waiting out before a retry. A longer bench passes the original 429 through instead of stalling the caller for minutes. */
+const MAX_429_RETRY_WAIT_MS = 15_000;
 
 /** Error thrown when Discord returns a non-2xx response. */
 export class DiscordApiError extends Error {
@@ -140,13 +143,13 @@ export function createBingoDiscordClient(args: {
 
   async function fetchWithRotator(args2: { url: string; pathname: string; guildId?: string }): Promise<Response> {
     const { url, pathname, guildId } = args2;
-    const routeKey = deriveRouteKey('GET', pathname);
+    const routeKey = deriveBudgetKey('GET', pathname);
 
     const acq = await acquireWithBackoff(routeKey, guildId);
     const versions = await getVersions();
 
     let response: Response;
-    let outcome: Awaited<ReturnType<typeof inspectResponse>>;
+    let outcome: ReleaseInput;
     let released = false;
     try {
       response = await fetcher(url, {
@@ -169,8 +172,14 @@ export function createBingoDiscordClient(args: {
 
     if (response.status !== 429) return response;
 
-    // Live 429: wait the shared backoff, then a single fresh acquire + retry (no loop - a second sustained cooldown just passes the original 429 through).
-    await wait(retryDelayMs(outcome));
+    // Live 429: wait the shared backoff, then a single fresh acquire + retry
+    // (no loop - a second sustained cooldown just passes the original 429
+    // through). A Retry-After longer than the cap passes the original 429
+    // straight through too, rather than stalling the request for minutes.
+    const retryDelay = retryDelayMs(outcome);
+    if (retryDelay > MAX_429_RETRY_WAIT_MS) return response;
+
+    await wait(retryDelay);
     const retry = await pool.acquire('default', routeKey, guildId);
     if (!retry.ok) return response;
 

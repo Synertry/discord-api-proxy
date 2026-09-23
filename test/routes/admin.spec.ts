@@ -10,7 +10,8 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { env } from 'cloudflare:test';
 import { createApp } from '../../src/index';
 import { pickProfileId } from '../../src/rotator/do';
-import { listProfileIds } from '../../src/fingerprint/profiles';
+import { FALLBACK_PROFILE_ID, listProfileIds } from '../../src/fingerprint/profiles';
+import { createTokenPoolClient, getPoolStub } from '../../src/rotator/client';
 
 const VALID_TOKEN = 'A'.repeat(40) + '.' + 'B'.repeat(10) + '.' + 'C'.repeat(40);
 const VALID_TOKEN_2 = 'D'.repeat(40) + '.' + 'E'.repeat(10) + '.' + 'F'.repeat(40);
@@ -403,17 +404,46 @@ describe('admin GET /admin/identity', () => {
 
   it('previews the deterministic label-hash profile a first acquire() will assign, for a never-acquired label', async () => {
     const app = admin();
-    const label = nextLabel();
+    // Fixed label: its pickProfileId result must differ from the fallback,
+    // which is asserted below. A timestamped label can hash to the fallback,
+    // making an equality assertion pass even for a preview that always
+    // returns the fallback.
+    const label = 'preview-token';
     await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: VALID_TOKEN });
+
+    const expectedProfileId = pickProfileId(label, listProfileIds());
+    expect(expectedProfileId).not.toBe(FALLBACK_PROFILE_ID);
+
     // Registering does NOT acquire the token, so fingerprintProfileId is still
     // unset at this point - the preview must resolve the SAME profile a real
     // first acquire() would assign via pickProfileId, not the unrelated
     // fallback template.
-    const expectedProfileId = pickProfileId(label, listProfileIds());
     const res = await adminGet(app, `/admin/identity?label=${label}`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { profileId: string };
     expect(body.profileId).toBe(expectedProfileId);
+
+    // An actual first acquire() assigns exactly that profile.
+    const client = createTokenPoolClient(getPoolStub(env));
+    if (!client.acquireByLabel) throw new Error('pool client unexpectedly lacks acquireByLabel');
+    const acquired = await client.acquireByLabel(label, 'default', 'GET:/guilds/219564597349318656/messages/search');
+    expect(acquired.ok).toBe(true);
+    if (!acquired.ok) throw new Error(`acquire unexpectedly unavailable: ${acquired.reason}`);
+    expect(acquired.fingerprintProfileId).toBe(expectedProfileId);
+  });
+
+  it('rejects an explicitly-empty label sent alongside a kind as 400', async () => {
+    const app = admin();
+    const res = await adminGet(app, '/admin/identity?kind=user-default&label=');
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects an empty single selector as 400', async () => {
+    const app = admin();
+    const emptyLabel = await adminGet(app, '/admin/identity?label=');
+    expect(emptyLabel.status).toBe(400);
+    const emptyKind = await adminGet(app, '/admin/identity?kind=');
+    expect(emptyKind.status).toBe(400);
   });
 
   it('returns 404 for an unregistered label', async () => {
@@ -428,7 +458,7 @@ describe('admin POST /admin/client-versions/refresh', () => {
     vi.unstubAllGlobals();
   });
 
-  it('returns 502 with an error body when both scrapes fail', async () => {
+  it('returns 502 with an error body when neither record could be refreshed', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response('unavailable', { status: 503 })),
@@ -437,7 +467,7 @@ describe('admin POST /admin/client-versions/refresh', () => {
     const res = await adminPost(app, '/admin/client-versions/refresh', {});
     expect(res.status).toBe(502);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toBe('both scrapes failed');
+    expect(body.error).toBe('neither client-version record refreshed');
   });
 
   it('persists both records on a successful scrape of both sources', async () => {

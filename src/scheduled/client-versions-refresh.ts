@@ -51,8 +51,9 @@ function wait(ms: number): Promise<void> {
 
 /**
  * Scrape and persist both version records. Each field is `null` when its own
- * scrape failed; the caller decides whether that (or a total failure) should
- * surface as a 502.
+ * scrape or persist failed (a record is only reported as refreshed once its
+ * write actually landed); the caller decides whether that (or a total failure)
+ * should surface as a 502.
  */
 export async function refreshClientVersions(env: Bindings): Promise<ClientVersionRecords> {
   const stub = getPoolStub(env) as unknown as DurableObjectStub<TokenPoolDO>;
@@ -61,16 +62,30 @@ export async function refreshClientVersions(env: Bindings): Promise<ClientVersio
 
   const [buildNumber, chromeMajor] = await Promise.all([scrapeBuildNumber(), scrapeChromeMajor()]);
 
+  // Persist each record independently: the two are separate DO storage writes,
+  // so a rejected write for one must not skip the other. A write failure is
+  // logged and leaves only that field `null` rather than throwing the whole
+  // refresh.
   let build: BuildNumberRecord | null = null;
   if (buildNumber !== null) {
-    build = { buildNumber, fetchedAt: Date.now(), source: 'scraped' };
-    await stub.setBuildNumberRecord(build);
+    const record: BuildNumberRecord = { buildNumber, fetchedAt: Date.now(), source: 'scraped' };
+    try {
+      await stub.setBuildNumberRecord(record);
+      build = record;
+    } catch (err: unknown) {
+      console.error('[client-versions] build_number persist failed:', err);
+    }
   }
 
   let chrome: ChromeVersionRecord | null = null;
   if (chromeMajor !== null) {
-    chrome = { major: chromeMajor, fetchedAt: Date.now(), source: 'scraped' };
-    await stub.setChromeVersionRecord(chrome);
+    const record: ChromeVersionRecord = { major: chromeMajor, fetchedAt: Date.now(), source: 'scraped' };
+    try {
+      await stub.setChromeVersionRecord(record);
+      chrome = record;
+    } catch (err: unknown) {
+      console.error('[client-versions] chrome major persist failed:', err);
+    }
   }
 
   return { build, chrome };

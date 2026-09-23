@@ -28,7 +28,6 @@ Realistic per-identity fingerprinting, header allowlisting, and an identity guar
 - [ ] **HTTP/2 frame ordering.** Same category as TLS fingerprinting; the runtime owns the transport, not the request code.
 - [ ] **Worker egress IP.** Requests originate from Cloudflare's own IP ranges regardless of fingerprint realism. Orthogonal to the token rotator's existing per-token-per-bucket mitigation (see above).
 - [ ] **`CF-Worker` / `CF-Connecting-IP` on cross-zone subrequests.** Cloudflare platform behavior on Worker-to-Worker-zone requests; not something request code can suppress.
-- [ ] **Custom-endpoint (`/custom/*`) inner-bucket pre-check.** Only identity-wide state (abuse circuits, global cooldown) is pre-checked before a custom endpoint's own fan-out of sub-requests; individual buckets are recorded as each sub-request settles but not pre-checked before it dispatches. Revisit if a custom endpoint's fan-out width grows enough to make an avoidable 429 costly.
 - [ ] **Per-request grease rotation.** `Sec-CH-UA`'s greased brand is fixed per Chrome major (matching a real client's per-launch, not per-request, grease selection) rather than rotated every call. Matches real client behavior; not a gap unless a specific detection vector is found.
 
 ## Cross-cutting tech debt (out of scope for the rotator)

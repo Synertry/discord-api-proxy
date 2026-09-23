@@ -345,7 +345,9 @@ export function buildAdminRoutes(): OpenAPIHono<{ Bindings: Bindings }> {
   admin.post('/client-versions/refresh', async (c) => {
     const records = await refreshClientVersions(c.env);
     if (!records.build && !records.chrome) {
-      return c.json({ error: 'both scrapes failed' }, 502);
+      // Either both scrapes failed or both persisted records failed to write;
+      // the records themselves always report which parts landed.
+      return c.json({ error: 'neither client-version record refreshed' }, 502);
     }
     return c.json(records);
   });
@@ -358,8 +360,14 @@ export function buildAdminRoutes(): OpenAPIHono<{ Bindings: Bindings }> {
   admin.get('/identity', async (c) => {
     const kindParam = c.req.query('kind');
     const labelParam = c.req.query('label');
-    if ((kindParam && labelParam) || (!kindParam && !labelParam)) {
-      return c.json({ error: 'exactly one of kind or label query params is required' }, 400);
+    const hasKind = kindParam !== undefined;
+    const hasLabel = labelParam !== undefined;
+    // Presence, not truthiness: `?kind=user-default&label=` supplies two
+    // selectors and must be rejected rather than silently treating the empty
+    // label as absent, and an explicitly-empty single selector (`?label=`,
+    // `?kind=`) is not a usable selector either.
+    if (hasKind === hasLabel || kindParam === '' || labelParam === '') {
+      return c.json({ error: 'exactly one non-empty kind or label query param is required' }, 400);
     }
 
     const stub = poolStub(c.env);

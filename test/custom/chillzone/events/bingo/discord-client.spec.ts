@@ -92,6 +92,36 @@ describe('createBingoDiscordClient: fetchWithRotator retry lease cleanup', () =>
 		expect(release).toHaveBeenCalledWith('tok-2', 'req-2', expect.objectContaining({ status: 200 }));
 	});
 
+	it('passes the original 429 through without waiting or retrying when Retry-After exceeds the retry cap', async () => {
+		__resetBingoClientCachesForTests();
+		const acquire = vi.fn(async (): Promise<AcquireResult> => ({
+			ok: true,
+			label: 'tok-1',
+			tokenSecret: 'SECRET_1',
+			requestId: 'req-1',
+			fingerprintProfileId: 'chrome-win-de',
+		}));
+		const release = vi.fn(async () => undefined);
+		const pool: TokenPoolClient = { acquire, release };
+		// Retry-After 600s -> retryDelayMs ~900000ms, far past the 15000ms cap.
+		const fetcher = vi.fn().mockResolvedValue(new Response('Rate limited', { status: 429, headers: { 'Retry-After': '600' } }));
+		const wait = vi.fn(async () => undefined);
+		const client = createBingoDiscordClient({ pool, fetcher: fetcher as unknown as typeof fetch, wait });
+
+		let caught: unknown;
+		try {
+			await client.countMessages(new URLSearchParams());
+		} catch (err: unknown) {
+			caught = err;
+		}
+		expect(caught).toBeInstanceOf(DiscordApiError);
+		expect((caught as DiscordApiError).status).toBe(429);
+		expect(acquire).toHaveBeenCalledTimes(1);
+		expect(fetcher).toHaveBeenCalledTimes(1);
+		expect(wait).not.toHaveBeenCalled();
+		expect(release).toHaveBeenCalledWith('tok-1', 'req-1', expect.objectContaining({ status: 429 }));
+	});
+
 	it('releases the initial token with status 599 when the initial fetch throws (no retry attempted)', async () => {
 		__resetBingoClientCachesForTests();
 		const acquire = vi.fn(async (): Promise<AcquireResult> => ({
