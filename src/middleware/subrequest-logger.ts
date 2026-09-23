@@ -32,9 +32,17 @@ import type { DiscordContextVariables } from './discord-context';
 
 const DISCORD_API_BASE = 'https://discord.com/api/v10';
 
-/** Strips the Discord API prefix to keep the log line scannable. */
+/**
+ * Webhook and interaction tokens are credentials carried in the path; this
+ * logger never writes them. It cannot redact the platform's own invocation
+ * log of the inbound request URL (`observability.logs.invocation_logs`).
+ */
+const PATH_TOKEN_REGEX = /\/(webhooks|interactions)\/(\d{17,20})\/[^/?#]+/gi;
+
+/** Strips the Discord API prefix to keep the log line scannable, and redacts path-borne tokens. */
 function shortenUrl(url: string): string {
-	return url.startsWith(DISCORD_API_BASE) ? url.slice(DISCORD_API_BASE.length) || '/' : url;
+	const short = url.startsWith(DISCORD_API_BASE) ? url.slice(DISCORD_API_BASE.length) || '/' : url;
+	return short.replace(PATH_TOKEN_REGEX, '/$1/$2/:token');
 }
 
 /** Extracts a printable URL from RequestInfo regardless of input shape. */

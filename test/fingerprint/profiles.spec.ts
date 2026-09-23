@@ -241,6 +241,13 @@ describe('validateCustomProfile / resolveCustom', () => {
     expect(result.profile.superProperties.device).toBe('M\u00fcnchen');
   });
 
+  it('rejects base64 superProperties that are not valid UTF-8 (e.g. a Latin-1 encoded capture)', () => {
+    // btoa of a Latin-1 string: the lone 0xFC byte for "\u00fc" is not valid UTF-8. A lenient decoder
+    // would store U+FFFD, and every later X-Super-Properties header would carry it.
+    const result = validateCustomProfile({ ...validInput, superProperties: btoa('{"device":"M\u00fcnchen"}') });
+    expect(result).toEqual({ ok: false, reason: 'superProperties-not-object' });
+  });
+
   it('rejects a client hint whose Chromium major contradicts the User-Agent', () => {
     const result = validateCustomProfile({
       ...validInput,

@@ -22,7 +22,7 @@ describe('subrequestLoggerMiddleware', () => {
 		logSpy.mockRestore();
 	});
 
-	function buildApp(innerFetch?: typeof fetch) {
+	function buildApp(innerFetch?: typeof fetch, target = 'https://discord.com/api/v10/users/@me') {
 		const app = new OpenAPIHono<{ Variables: DiscordContextVariables }>();
 		if (innerFetch) {
 			app.use('*', async (c, next) => {
@@ -33,7 +33,7 @@ describe('subrequestLoggerMiddleware', () => {
 		app.use('*', subrequestLoggerMiddleware);
 		app.get('/probe', async (c) => {
 			const fetcher = c.var.proxyFetch ?? fetch;
-			const r = await fetcher('https://discord.com/api/v10/users/@me');
+			const r = await fetcher(target);
 			return c.text(`status=${r.status}`);
 		});
 		return app;
@@ -67,4 +67,16 @@ describe('subrequestLoggerMiddleware', () => {
 		expect(line).toContain('AbortError');
 	});
 
+	it.each([
+		['webhook', 'https://discord.com/api/v10/webhooks/123456789012345678/SeCrEtToKeN-1/messages/@original?wait=true', '/webhooks/123456789012345678/:token/messages/@original?wait=true'],
+		['interaction', 'https://discord.com/api/v10/interactions/123456789012345678/SeCrEtToKeN-1/callback', '/interactions/123456789012345678/:token/callback'],
+	])('never writes a %s token to the log', async (_kind, target, expected) => {
+		const innerFetch = vi.fn(async () => new Response('ok', { status: 200 })) as unknown as typeof fetch;
+		const app = buildApp(innerFetch, target);
+
+		await app.request('http://localhost/probe');
+		const line = logSpy.mock.calls[0][0] as string;
+		expect(line).not.toContain('SeCrEtToKeN');
+		expect(line).toContain(expected);
+	});
 });

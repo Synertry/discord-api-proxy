@@ -241,7 +241,8 @@ export function validateCustomProfile(input: unknown): ValidateCustomProfileResu
     // same documented rejection.
     let decoded: unknown;
     try {
-      decoded = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(candidate.superProperties), (c) => c.charCodeAt(0))));
+      const bytes = Uint8Array.from(atob(candidate.superProperties), (c) => c.charCodeAt(0));
+      decoded = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes));
     } catch {
       return { ok: false, reason: 'superProperties-not-object' };
     }

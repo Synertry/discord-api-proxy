@@ -36,7 +36,7 @@
  */
 
 import type { BuildNumberRecord, ChromeVersionRecord, ClientVersionRecords } from '../fingerprint/versions';
-import { createTokenPoolClient, getPoolStub } from '../rotator/client';
+import { getPoolStub } from '../rotator/client';
 import type { TokenPoolDO } from '../rotator/do';
 import type { Bindings } from '../types';
 
@@ -57,8 +57,6 @@ function wait(ms: number): Promise<void> {
  */
 export async function refreshClientVersions(env: Bindings): Promise<ClientVersionRecords> {
   const stub = getPoolStub(env) as unknown as DurableObjectStub<TokenPoolDO>;
-  const client = createTokenPoolClient(stub);
-  void client; // unused; we call the DO RPCs directly because the wrapper omits the setter methods
 
   const [buildNumber, chromeMajor] = await Promise.all([scrapeBuildNumber(), scrapeChromeMajor()]);
 
@@ -98,12 +96,12 @@ export async function scheduledClientVersionsHandler(env: Bindings): Promise<voi
     if (build) {
       console.log(`[client-versions] build_number refreshed: ${build.buildNumber}`);
     } else {
-      console.error('[client-versions] build_number scrape failed; DO meta untouched');
+      console.error('[client-versions] build_number not refreshed (scrape or persist failed); stored record untouched');
     }
     if (chrome) {
       console.log(`[client-versions] chrome major refreshed: ${chrome.major}`);
     } else {
-      console.error('[client-versions] chrome major scrape failed; DO meta untouched');
+      console.error('[client-versions] chrome major not refreshed (scrape or persist failed); stored record untouched');
     }
   } catch (err: unknown) {
     console.error('[client-versions] scheduled handler errored:', err);

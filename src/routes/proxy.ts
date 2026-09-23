@@ -287,10 +287,11 @@ async function dispatch(
  * Fill `nonce`/`tts`/`flags` on a JSON message-send body. The body is never
  * re-serialized: a caller's numeric `nonce` above 2^53 (Discord accepts
  * 64-bit ids) would round through `JSON.parse` + `JSON.stringify`, so the
- * original text is forwarded byte-for-byte when nothing is missing, and
- * otherwise the missing `"key":value` pairs are spliced in textually before
- * the final closing brace, leaving every original lexeme untouched. Forwards
- * the original text unchanged on parse failure or a non-object body.
+ * decoded text is forwarded unchanged when nothing is missing (identical to
+ * the inbound bytes for valid UTF-8 without a BOM), and otherwise the missing
+ * `"key":value` pairs are spliced in textually before the final closing
+ * brace, leaving every original lexeme untouched. Forwards the text unchanged
+ * on parse failure or a non-object body.
  */
 function fillMessageBody(text: string): { body: string; content: string | undefined } {
   let parsed: unknown;

@@ -516,7 +516,9 @@ export class TokenPoolDO extends DurableObject<Bindings> {
 
   /** Delete a token. Idempotent. */
   async unregister(label: string): Promise<void> {
-    await this.ctx.storage.delete(`${TOKEN_KEY_PREFIX}${label}`);
+    // Queued too: a bare delete running between a queued `release`'s read and
+    // write would be undone when that release re-persists the token.
+    return this.#serialize(() => this.ctx.storage.delete(`${TOKEN_KEY_PREFIX}${label}`).then(() => undefined));
   }
 
   /** Reset a token to active status (operator action after fixing whatever caused 401s). */
