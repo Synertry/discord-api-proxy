@@ -53,6 +53,7 @@ function makeMockPool(): TokenPoolClient {
 			label: 'test-tok',
 			tokenSecret: 'POOLED_USER_TOKEN',
 			requestId: `req-${n++}`,
+			fingerprintProfileId: 'chrome-win-de',
 		})),
 		release: vi.fn(async () => {}),
 	};

@@ -331,6 +331,66 @@ describe('Proxy Route (message-send body fill and opt-in typing)', () => {
     expect(declaredLength).toBe(new TextEncoder().encode(sentBody).byteLength);
     expect(declaredLength).not.toBe(sentBody.length); // the multibyte emoji makes byte length != UTF-16 length
   });
+
+  function chunkedBody(text: string, chunkSize = 16 * 1024): ReadableStream<Uint8Array> {
+    const bytes = new TextEncoder().encode(text);
+    let offset = 0;
+    return new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset >= bytes.byteLength) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(bytes.slice(offset, offset + chunkSize));
+        offset += chunkSize;
+      },
+    });
+  }
+
+  it('streams an oversized chunked message body (no Content-Length) through byte-identical instead of buffering and filling it', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: '1' }));
+    const app = createApp(mockFetch as unknown as typeof fetch);
+    const originalBody = JSON.stringify({ content: 'x'.repeat(70_000) });
+    const req = new Request(messagesUrl(), {
+      method: 'POST',
+      headers: { 'x-auth-key': 'secret-key', 'x-proxy-context': 'user', 'content-type': 'application/json' },
+      body: chunkedBody(originalBody),
+      duplex: 'half',
+    } as RequestInit);
+    const res = await app.request(req, undefined, MOCK_ENV);
+    expect(res.status).toBe(200);
+    const init = callInit(mockFetch);
+    expect(typeof init.body).not.toBe('string');
+    const forwarded = await new Response(init.body).text();
+    expect(forwarded).toBe(originalBody);
+  });
+
+  it('still fills a small chunked message body that arrives without Content-Length', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: '1' }));
+    const app = createApp(mockFetch as unknown as typeof fetch);
+    const req = new Request(messagesUrl(), {
+      method: 'POST',
+      headers: { 'x-auth-key': 'secret-key', 'x-proxy-context': 'user', 'content-type': 'application/json' },
+      body: chunkedBody(JSON.stringify({ content: 'hi' }), 4),
+      duplex: 'half',
+    } as RequestInit);
+    await app.request(req, undefined, MOCK_ENV);
+    const sent = JSON.parse(callInit(mockFetch).body as string) as { content: string; nonce: string };
+    expect(sent.content).toBe('hi');
+    expect(sent.nonce).toMatch(/^\d{17,20}$/);
+  });
+
+  it('sets the mapped X-Context-Properties default on a user-token create-DM request', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: '1' }));
+    const app = createApp(mockFetch as unknown as typeof fetch);
+    const req = new Request('http://localhost/users/@me/channels', {
+      method: 'POST',
+      headers: { 'x-auth-key': 'secret-key', 'x-proxy-context': 'user', 'content-type': 'application/json' },
+      body: JSON.stringify({ recipients: ['123456789012345678'] }),
+    });
+    await app.request(req, undefined, MOCK_ENV);
+    expect(callHeaders(mockFetch).get('X-Context-Properties')).toBe('e30=');
+  });
 });
 
 describe('Proxy Route (pool acquire, auto selector)', () => {

@@ -154,7 +154,11 @@ async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOpti
         signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
       });
     } catch (err: unknown) {
-      if (lease) await opts.guard?.settle(lease.requestId, { status: 599, routeKey: MESSAGES_ROUTE }).catch(() => undefined);
+      if (lease) {
+        await opts.guard?.settle(lease.requestId, { status: 599, routeKey: MESSAGES_ROUTE }).catch((cleanupErr: unknown) => {
+          console.error('paged-messages guard cleanup failed:', cleanupErr);
+        });
+      }
       const message = err instanceof Error ? err.message : String(err);
       throw new DiscordApiError(0, `Network error: ${message}`);
     }

@@ -59,9 +59,12 @@ export function evaluateTokenEligibility(
     return { ok: false, reason: 'no-eligible-token' };
   }
 
-  const candidates: number[] = [];
-
   const budget = evaluateBudget(t, routeKey, now, upstreamCircuit);
+  // An open circuit is a hard gate for its full duration (see `evaluateBudget`);
+  // never let a sooner guild-ineligibility expiry understate it.
+  if (!budget.ok && budget.signal) return { ok: false, reason: 'cooldown', retryAfter: budget.retryAfter };
+
+  const candidates: number[] = [];
   if (!budget.ok) candidates.push(now + budget.retryAfter);
 
   if (guildId) {

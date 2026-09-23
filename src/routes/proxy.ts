@@ -106,14 +106,23 @@ proxyRoute.all('/*', async (c) => {
     if (method !== 'GET' && method !== 'HEAD') {
       const contentType = (c.req.header('content-type') ?? '').toLowerCase();
       const contentLengthHeader = c.req.header('content-length');
-      const smallEnough = contentLengthHeader === undefined || Number(contentLengthHeader) < MAX_FILLABLE_BODY_BYTES;
-      const fillable = kind !== 'bot' && routeKey === MESSAGE_SEND_ROUTE && contentType.startsWith('application/json') && smallEnough;
-      if (fillable) {
-        const filled = fillMessageBody(await c.req.text());
-        bodyInit = filled.body;
-        messageContent = filled.content;
+      // A declared length at or over the cap streams through unread. An absent
+      // one (chunked upload) is read with the cap enforced on the actual bytes,
+      // so an oversized chunked body is never buffered whole.
+      const declaredTooLarge = contentLengthHeader !== undefined && Number(contentLengthHeader) >= MAX_FILLABLE_BODY_BYTES;
+      const fillable = kind !== 'bot' && routeKey === MESSAGE_SEND_ROUTE && contentType.startsWith('application/json') && !declaredTooLarge;
+      const rawBody = c.req.raw.body ?? undefined;
+      if (fillable && rawBody) {
+        const read = await readBodyUpTo(rawBody, MAX_FILLABLE_BODY_BYTES);
+        if (read.kind === 'text') {
+          const filled = fillMessageBody(read.text);
+          bodyInit = filled.body;
+          messageContent = filled.content;
+        } else {
+          bodyInit = read.stream;
+        }
       } else {
-        bodyInit = c.req.raw.body ?? undefined;
+        bodyInit = rawBody;
       }
     }
 
@@ -186,10 +195,7 @@ proxyRoute.all('/*', async (c) => {
         // matches the actual byte length; recompute it.
         headers.set('Content-Length', String(new TextEncoder().encode(bodyInit).byteLength));
       }
-      if (routeKey === MESSAGE_SEND_ROUTE && !headers.has('X-Context-Properties')) {
-        const contextProperties = contextPropertiesFor(routeKey);
-        if (contextProperties) headers.set('X-Context-Properties', contextProperties);
-      }
+      applyContextProperties(headers, routeKey);
 
       const response = await dispatch(fetcher, discordUrl, method, headers, bodyInit);
       const outcome = await inspectResponse(response, routeKey, guildId);
@@ -271,6 +277,61 @@ function fillMessageBody(text: string): { body: string; content: string | undefi
   if (obj.flags === undefined) obj.flags = 0;
   const content = typeof obj.content === 'string' && obj.content.length > 0 ? obj.content : undefined;
   return { body: JSON.stringify(obj), content };
+}
+
+/**
+ * Read a request body only while it stays under `cap` bytes. Returns the
+ * decoded text when the whole body fits; otherwise a stream that replays the
+ * bytes already read followed by the unread remainder, so an oversized body is
+ * forwarded unchanged without ever being held in memory whole.
+ */
+async function readBodyUpTo(
+  body: ReadableStream<Uint8Array>,
+  cap: number,
+): Promise<{ kind: 'text'; text: string } | { kind: 'stream'; stream: ReadableStream<Uint8Array> }> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    total += value.byteLength;
+    if (total >= cap) return { kind: 'stream', stream: replayThenRest(chunks, reader) };
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { kind: 'text', text: new TextDecoder().decode(bytes) };
+}
+
+/** A stream that first emits `buffered`, then pulls the rest from `reader`. */
+function replayThenRest(buffered: readonly Uint8Array[], reader: ReadableStreamDefaultReader<Uint8Array>): ReadableStream<Uint8Array> {
+  let next = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (next < buffered.length) {
+        controller.enqueue(buffered[next++]);
+        return;
+      }
+      const { done, value } = await reader.read();
+      if (done) controller.close();
+      else controller.enqueue(value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
+/** Set the route's default `X-Context-Properties` (see `context-properties.ts`) unless the caller already sent one. */
+function applyContextProperties(headers: Headers, routeKey: RouteKey): void {
+  if (headers.has('X-Context-Properties')) return;
+  const contextProperties = contextPropertiesFor(routeKey);
+  if (contextProperties) headers.set('X-Context-Properties', contextProperties);
 }
 
 /** Pre-send typing delay: a rough humanized read of `600ms + 55ms/char`, clamped to 1-4s, plus up to 400ms of jitter. */
@@ -382,7 +443,11 @@ async function dispatchTyping(args: {
       settled = true;
       await response.body?.cancel();
     } catch (err: unknown) {
-      if (!settled) await args.guard.settle(lease.requestId, { status: 599, routeKey: TYPING_ROUTE }).catch(() => undefined);
+      if (!settled) {
+        await args.guard.settle(lease.requestId, { status: 599, routeKey: TYPING_ROUTE }).catch((cleanupErr: unknown) => {
+          console.error('PROXY typing guard cleanup failed:', cleanupErr);
+        });
+      }
       console.error('PROXY typing dispatch failed:', err);
     }
     return true;
@@ -440,10 +505,7 @@ async function retryPool(args: {
       versions: args.versions,
       inbound: args.headers,
     });
-    if (args.plan.routeKey === MESSAGE_SEND_ROUTE && !retryHeaders.has('X-Context-Properties')) {
-      const contextProperties = contextPropertiesFor(args.plan.routeKey);
-      if (contextProperties) retryHeaders.set('X-Context-Properties', contextProperties);
-    }
+    applyContextProperties(retryHeaders, args.plan.routeKey);
 
     const retryResponse = await dispatch(args.fetcher, args.discordUrl, args.method, retryHeaders, undefined);
     const retryOutcome = await inspectResponse(retryResponse, args.plan.routeKey, args.plan.guildId);

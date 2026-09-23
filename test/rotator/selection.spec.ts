@@ -228,6 +228,22 @@ describe('evaluateTokenEligibility', () => {
     const r = evaluateTokenEligibility(t, 'default', ROUTE, NOW, '219');
     expect(r).toEqual({ ok: false, reason: 'cooldown', retryAfter: 2000 });
   });
+
+  it('reports an open circuit for its full duration, never masked by a sooner guild-ineligibility expiry', () => {
+    const t = makeToken('a', {
+      circuit: { signal: 'captcha', until: NOW + 30 * 60 * 1000, openedAt: NOW },
+      ineligibleGuilds: [{ guildId: '219', expiresAt: NOW + 3000 }],
+    });
+    const r = evaluateTokenEligibility(t, 'default', ROUTE, NOW, '219');
+    expect(r).toEqual({ ok: false, reason: 'cooldown', retryAfter: 30 * 60 * 1000 });
+  });
+
+  it('reports the DO-wide upstream circuit for its full duration over a sooner guild-ineligibility expiry', () => {
+    const t = makeToken('a', { ineligibleGuilds: [{ guildId: '219', expiresAt: NOW + 3000 }] });
+    const upstream = { signal: 'cloudflare' as const, until: NOW + 10 * 60 * 1000, openedAt: NOW };
+    const r = evaluateTokenEligibility(t, 'default', ROUTE, NOW, '219', upstream);
+    expect(r).toEqual({ ok: false, reason: 'cooldown', retryAfter: 10 * 60 * 1000 });
+  });
 });
 
 describe('isBucketCooling / isGuildIneligible', () => {

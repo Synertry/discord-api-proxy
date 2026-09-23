@@ -34,6 +34,20 @@ export const COOLDOWN_BACKOFF_FACTOR = 1.5;
 export const BUCKET_STATES_CAP = 200;
 
 /**
+ * Cap on per-identity route -> bucket mappings. Pool tokens only ever see the
+ * rotatable allowlist, but a static identity serves arbitrary caller paths, and
+ * paths with non-snowflake segments (e.g. `/invites/<code>`) each derive a
+ * distinct route key while Discord reports one shared bucket, so without this
+ * cap the persisted record would grow with every new path. Losing a mapping is
+ * safe: `evaluateBudget` treats the route as an unknown bucket and probes it one
+ * request at a time until a response re-teaches it.
+ */
+export const ROUTE_TO_BUCKET_CAP = 400;
+
+/** Longest route key worth remembering a bucket mapping for. Real Discord route keys are well under 100 characters; a caller-chosen path can be kilobytes long, and together with `ROUTE_TO_BUCKET_CAP` this keeps the persisted record far below the SQLite-backed DO's 2 MB per-value limit. */
+export const ROUTE_KEY_MAX_LENGTH = 256;
+
+/**
  * Minimum spacing between two dispatched requests for the *same* identity
  * (token or static identity), regardless of route - the Discord hard rule's
  * "never send back-to-back requests" floor, enforced per-identity so the
@@ -189,8 +203,8 @@ export function applyOutcome(budget: BucketBudget, requestId: string | null, out
       ...bucketStates,
       [outcome.discordBucketHash]: { remaining: outcome.remaining ?? 0, resetAt: now + (outcome.resetAfterMs ?? 0) },
     };
-    routeToBucket = { ...routeToBucket, [outcome.routeKey]: outcome.discordBucketHash };
     bucketStates = evictOldestBucketsIfOverCap(bucketStates);
+    routeToBucket = recordRouteBucket(routeToBucket, outcome.routeKey, outcome.discordBucketHash, bucketStates);
   }
 
   let circuit = budget.circuit;
@@ -243,4 +257,23 @@ function evictOldestBucketsIfOverCap(bucketStates: BucketBudget['bucketStates'])
   entries.sort(([, a], [, b]) => a.resetAt - b.resetAt);
   const trimmed = entries.slice(entries.length - BUCKET_STATES_CAP);
   return Object.fromEntries(trimmed);
+}
+
+/**
+ * Record `routeKey -> bucketHash` as the most recently seen mapping, drop every
+ * mapping whose bucket is no longer tracked in `bucketStates` (evicted above),
+ * and keep at most `ROUTE_TO_BUCKET_CAP` of the most recently seen routes.
+ * Recency is insertion order: the route is removed and re-appended on every
+ * sighting. Route keys always contain `:` and `/`, so they are never
+ * integer-like and object insertion order holds. Pure.
+ */
+function recordRouteBucket(
+  routeToBucket: BucketBudget['routeToBucket'],
+  routeKey: RouteKey,
+  bucketHash: string,
+  bucketStates: BucketBudget['bucketStates'],
+): BucketBudget['routeToBucket'] {
+  const kept = Object.entries(routeToBucket).filter(([key, hash]) => key !== routeKey && Object.hasOwn(bucketStates, hash));
+  if (routeKey.length <= ROUTE_KEY_MAX_LENGTH && Object.hasOwn(bucketStates, bucketHash)) kept.push([routeKey, bucketHash]);
+  return Object.fromEntries(kept.slice(-ROUTE_TO_BUCKET_CAP));
 }

@@ -51,6 +51,9 @@ const MEMBER_CACHE_TTL_MS = 60_000;
 /** Cap on the acquire-cooldown backoff loop - bounds worst-case latency on a sustained busy pool rather than retrying forever. */
 const MAX_ACQUIRE_ATTEMPTS = 5;
 
+/** Longest single cooldown worth waiting out. Anything longer (an open captcha/Cloudflare circuit, a long bucket reset) fails fast with a 429 instead of stalling the request for minutes; mirrors the shared pager's block-wait cap. */
+const MAX_ACQUIRE_WAIT_MS = 5000;
+
 /** Error thrown when Discord returns a non-2xx response. */
 export class DiscordApiError extends Error {
   constructor(
@@ -122,12 +125,12 @@ export function createBingoDiscordClient(args: {
     });
   }
 
-  /** Acquire with a backoff-and-retry loop on routine cooldown backpressure. Throws `DiscordApiError(429, ...)` on any non-cooldown failure, or once `MAX_ACQUIRE_ATTEMPTS` is exhausted. */
+  /** Acquire with a backoff-and-retry loop on routine cooldown backpressure. Throws `DiscordApiError(429, ...)` on any non-cooldown failure, on a cooldown longer than `MAX_ACQUIRE_WAIT_MS`, or once `MAX_ACQUIRE_ATTEMPTS` is exhausted. */
   async function acquireWithBackoff(routeKey: RouteKey, guildId: string | undefined): Promise<AcquireSuccess> {
     for (let attempt = 0; attempt < MAX_ACQUIRE_ATTEMPTS; attempt++) {
       const result = await pool.acquire('default', routeKey, guildId);
       if (result.ok) return result;
-      if (result.reason !== 'cooldown') {
+      if (result.reason !== 'cooldown' || result.retryAfter > MAX_ACQUIRE_WAIT_MS) {
         throw new DiscordApiError(429, `pool unavailable: reason=${result.reason} retryAfter=${result.retryAfter}`);
       }
       await wait(Math.max(1000, result.retryAfter));

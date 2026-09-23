@@ -146,7 +146,7 @@ describe('validateCustomProfile / resolveCustom', () => {
     const result = validateCustomProfile(validInput);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const sp = result.profile.superProperties as Record<string, unknown>;
+    const sp = result.profile.superProperties as unknown as Record<string, unknown>;
     expect(sp.client_build_number).toBeUndefined();
     expect(sp.client_launch_id).toBeUndefined();
     expect(sp.launch_signature).toBeUndefined();

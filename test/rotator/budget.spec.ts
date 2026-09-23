@@ -17,6 +17,8 @@ import {
   CAPTCHA_CIRCUIT_MS,
   CLOUDFLARE_CIRCUIT_MS,
   BUCKET_STATES_CAP,
+  ROUTE_TO_BUCKET_CAP,
+  ROUTE_KEY_MAX_LENGTH,
   LEASE_TTL_MS,
   UNKNOWN_BUCKET_RETRY_MS,
 } from '../../src/rotator/budget';
@@ -329,6 +331,33 @@ describe('applyOutcome', () => {
     }
     expect(Object.keys(budget.bucketStates).length).toBe(BUCKET_STATES_CAP);
     expect(budget.bucketStates.b0).toBeUndefined();
+    // A route whose bucket was evicted must not keep a dangling mapping behind.
+    expect(budget.routeToBucket['GET:/r0']).toBeUndefined();
+    expect(Object.keys(budget.routeToBucket).length).toBe(BUCKET_STATES_CAP);
+  });
+
+  it('bounds route mappings that all share one bucket, keeping the most recently seen routes', () => {
+    // Caller-chosen paths with non-snowflake segments (e.g. /invites/<code>)
+    // each derive a distinct route key while Discord reports one shared bucket.
+    let budget = emptyBudget();
+    const outcomeFor = (i: number) => ({ status: 200, routeKey: `GET:/invites/code${i}`, discordBucketHash: 'shared', remaining: 5, resetAfterMs: 1000 });
+    for (let i = 0; i < ROUTE_TO_BUCKET_CAP + 50; i++) {
+      budget = applyOutcome(budget, null, outcomeFor(i), NOW);
+      // Keep route 0 hot: a route seen again must count as recent, not be evicted by age of first insert.
+      if (i % 10 === 0) budget = applyOutcome(budget, null, outcomeFor(0), NOW);
+    }
+    expect(Object.keys(budget.routeToBucket).length).toBe(ROUTE_TO_BUCKET_CAP);
+    expect(budget.routeToBucket['GET:/invites/code0']).toBe('shared');
+    expect(budget.routeToBucket[`GET:/invites/code${ROUTE_TO_BUCKET_CAP + 49}`]).toBe('shared');
+    expect(budget.routeToBucket['GET:/invites/code1']).toBeUndefined();
+  });
+
+  it('never records a mapping for an oversized route key, but still learns the bucket state', () => {
+    // A caller-chosen path can be kilobytes long; 400 of those would blow past the DO's per-value size limit.
+    const longRoute = `GET:/invites/${'a'.repeat(ROUTE_KEY_MAX_LENGTH)}`;
+    const result = applyOutcome(emptyBudget(), null, { status: 200, routeKey: longRoute, discordBucketHash: 'b1', remaining: 3, resetAfterMs: 1000 }, NOW);
+    expect(result.routeToBucket[longRoute]).toBeUndefined();
+    expect(result.bucketStates.b1).toEqual({ remaining: 3, resetAt: NOW + 1000 });
   });
 
   describe('requestId-gated settlement', () => {

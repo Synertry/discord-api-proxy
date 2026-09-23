@@ -118,3 +118,47 @@ describe('createBingoDiscordClient: fetchWithRotator retry lease cleanup', () =>
 		expect(release).toHaveBeenCalledWith('tok-1', 'req-1', expect.objectContaining({ status: 599 }));
 	});
 });
+
+describe('createBingoDiscordClient: acquire backoff', () => {
+	it('fails fast with a 429 on a long pool cooldown (an open circuit) instead of waiting it out', async () => {
+		__resetBingoClientCachesForTests();
+		const acquire = vi.fn(async (): Promise<AcquireResult> => ({ ok: false, reason: 'cooldown', retryAfter: 30 * 60 * 1000 }));
+		const release = vi.fn(async () => undefined);
+		const pool: TokenPoolClient = { acquire, release };
+		const fetcher = vi.fn();
+		const wait = vi.fn(async () => undefined);
+		const client = createBingoDiscordClient({ pool, fetcher: fetcher as unknown as typeof fetch, wait });
+
+		let caught: unknown;
+		try {
+			await client.fetchGuildMember(USER_ID);
+		} catch (err: unknown) {
+			caught = err;
+		}
+		expect(caught).toBeInstanceOf(DiscordApiError);
+		expect((caught as DiscordApiError).status).toBe(429);
+		expect(acquire).toHaveBeenCalledTimes(1);
+		expect(wait).not.toHaveBeenCalled();
+		expect(fetcher).not.toHaveBeenCalled();
+	});
+
+	it('waits out a short cooldown and dispatches once the pool frees up', async () => {
+		__resetBingoClientCachesForTests();
+		let acquireCalls = 0;
+		const acquire = vi.fn(async (): Promise<AcquireResult> => {
+			acquireCalls += 1;
+			if (acquireCalls === 1) return { ok: false, reason: 'cooldown', retryAfter: 1200 };
+			return { ok: true, label: 'tok-1', tokenSecret: 'SECRET_1', requestId: 'req-1', fingerprintProfileId: 'chrome-win-de' };
+		});
+		const release = vi.fn(async () => undefined);
+		const pool: TokenPoolClient = { acquire, release };
+		const fetcher = vi.fn().mockImplementation(async () => jsonResponse({ id: USER_ID, user: { id: USER_ID, username: 'u' }, roles: [] }));
+		const wait = vi.fn(async () => undefined);
+		const client = createBingoDiscordClient({ pool, fetcher: fetcher as unknown as typeof fetch, wait });
+
+		const member = await client.fetchGuildMember(USER_ID);
+		expect(member.user.id).toBe(USER_ID);
+		expect(wait).toHaveBeenCalledWith(1200);
+		expect(fetcher).toHaveBeenCalledTimes(1);
+	});
+});

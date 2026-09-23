@@ -21,12 +21,12 @@ const CHAT_INPUT = 'eyJsb2NhdGlvbiI6ImNoYXRfaW5wdXQifQ==';
 /** `{}` base64-encoded. */
 const EMPTY = 'e30=';
 
-const CONTEXT_PROPERTIES_BY_ROUTE: Readonly<Record<string, string>> = {
-  'POST:/channels/:id/messages': CHAT_INPUT,
-  'POST:/users/@me/channels': EMPTY,
-};
+const CONTEXT_PROPERTIES_BY_ROUTE: ReadonlyMap<RouteKey, string> = new Map([
+  ['POST:/channels/:id/messages', CHAT_INPUT],
+  ['POST:/users/@me/channels', EMPTY],
+]);
 
 /** The default `X-Context-Properties` value for a route, or undefined when the route has none. */
 export function contextPropertiesFor(routeKey: RouteKey): string | undefined {
-  return CONTEXT_PROPERTIES_BY_ROUTE[routeKey];
+  return CONTEXT_PROPERTIES_BY_ROUTE.get(routeKey);
 }
