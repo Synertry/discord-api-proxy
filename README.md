@@ -31,7 +31,7 @@ Original motivation was for my Google Sheets to be able to call the Discord API,
 | Framework        | [Hono](https://hono.dev) + `@hono/zod-openapi` |
 | Language         | TypeScript (strict mode)                       |
 | Validation       | Zod                                            |
-| Testing          | Vitest + `@cloudflare/vitest-pool-workers`     |
+| Testing          | Vitest + `@cloudflare/vitest-plugin`           |
 | Package Manager  | Bun                                            |
 
 ## Getting Started
@@ -108,13 +108,14 @@ Request
 [Discord Context]          Selects bot/user static token + records discordTokenKind based on authSlot
   |
   v
+[Snowflake Validator]      Validates Discord IDs in URL path segments (before identity resolution, so a malformed
+                            path never costs a Durable Object round trip)
+  |
+  v
 [Identity Middleware]      Resolves live client versions + a fallback identity (static path); records a
                             PoolPlan on allow-listed routes and constructs one shared StaticGuard, but never
                             itself acquires a pool token or leases the guard - that only happens at the point
                             of each outbound fetch
-  |
-  v
-[Snowflake Validator]      Validates Discord IDs in URL path segments
   |
   v
 [Subrequest Logger]        Wraps proxyFetch for streaming visibility
@@ -232,7 +233,7 @@ test/
   env.d.ts                    Cloudflare test type augmentation
   middleware/                 Unit tests for each middleware
   routes/                     Integration tests for proxy, custom, admin, healthcheck
-  rotator/                    DO + pure-function tests via @cloudflare/vitest-pool-workers
+  rotator/                    DO + pure-function tests via @cloudflare/vitest-plugin
   fingerprint/                Header composer, profile registry, session, versions tests
   custom/                     Shared pager + per-event classifier/tallier/formatter/handler tests
   scheduled/                  Client-versions refresh (independent persistence of both records)
@@ -262,11 +263,11 @@ Returns `{ "tally": 0 }`. Placeholder for now. Not yet imported from my private 
 ## Testing
 
 ```bash
-bun run test           # Run all 685 tests across 43 suites
+bun run test           # Run all 688 tests across 43 suites
 bun run test -- --ui   # Open Vitest UI
 ```
 
-Tests use `@cloudflare/vitest-pool-workers` to run in a Workers-compatible runtime. Discord API calls are mocked at the fetch level. `TokenPoolDO` runs in the real DO simulation; tests inject either a mock pool client (`createApp(mockFetch, mockTokenPool)`) or exercise the DO directly via `runInDurableObject`.
+Tests use `@cloudflare/vitest-plugin` to run in a Workers-compatible runtime. Discord API calls are mocked at the fetch level. `TokenPoolDO` runs in the real DO simulation; tests inject either a mock pool client (`createApp(mockFetch, mockTokenPool)`) or exercise the DO directly via `runInDurableObject`.
 
 ## Deployment
 

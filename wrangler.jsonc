@@ -14,7 +14,7 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "discord-api-proxy",
 	"main": "src/index.ts",
-	"compatibility_date": "2026-05-14",
+	"compatibility_date": "2026-09-23",
 	"routes": [
 		{
 			"pattern": "__CUSTOM_DOMAIN__",
@@ -54,8 +54,11 @@
 	],
 	/**
 	 * Scheduled handlers.
-	 * `0 4 * * *` = 04:00 UTC daily - refreshes the Discord client
-	 * build_number for fingerprint composition.
+	 * `0 4 * * *` = 04:00 UTC daily - refreshes the Discord web build_number
+	 * and the Chrome stable major that every generated fingerprint profile is
+	 * built from (see src/scheduled/client-versions-refresh.ts). Without it the
+	 * stored values age past their staleness ceilings and the proxy falls back
+	 * to the hardcoded constants in src/fingerprint/versions.ts.
 	 */
 	"triggers": {
 		"crons": ["0 4 * * *"]
