@@ -8,7 +8,7 @@
 
 /**
  * @module middleware/subrequest-logger
- * Wraps `c.var.proxyFetch` with a per-call structured `console.log`.
+ * Wraps `c.var.proxyFetch` with a per-call log line.
  *
  * Wrangler's request-line summary lands at end-of-response, hiding which
  * Discord subcall is slow or retrying mid-flight. A `/custom/...` request
@@ -29,6 +29,9 @@
 
 import { createMiddleware } from 'hono/factory';
 import type { DiscordContextVariables } from './discord-context';
+import { createLogger } from '../logger';
+
+const log = createLogger('subreq');
 
 const DISCORD_API_BASE = 'https://discord.com/api/v10';
 
@@ -136,12 +139,12 @@ function wrapWithLogging(inner: typeof fetch): typeof fetch {
 		try {
 			const res = await inner(input, init);
 			const ms = Date.now() - t0;
-			console.log(`[subreq] ${String(res.status).padEnd(3)} ${String(ms).padStart(5)}ms ${method.padEnd(5)} ${shortenUrl(url)}`);
+			log.info(`${String(res.status).padEnd(3)} ${String(ms).padStart(5)}ms ${method.padEnd(5)} ${shortenUrl(url)}`);
 			return res;
 		} catch (err: unknown) {
 			const ms = Date.now() - t0;
 			const reason = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-			console.log(`[subreq] ERR ${String(ms).padStart(5)}ms ${method.padEnd(5)} ${shortenUrl(url)}   (${reason})`);
+			log.info(`ERR ${String(ms).padStart(5)}ms ${method.padEnd(5)} ${shortenUrl(url)}   (${reason})`);
 			throw err;
 		}
 	}) as typeof fetch;

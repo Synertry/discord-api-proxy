@@ -39,6 +39,9 @@ import type { BuildNumberRecord, ChromeVersionRecord, ClientVersionRecords } fro
 import { getPoolStub } from '../rotator/client';
 import type { TokenPoolDO } from '../rotator/do';
 import type { Bindings } from '../types';
+import { createLogger } from '../logger';
+
+const log = createLogger('client-versions');
 
 const CHROME_VERSION_HISTORY_URL = 'https://versionhistory.googleapis.com/v1/chrome/platforms/win/channels/stable/versions?pageSize=1';
 const USER_AGENT = 'discord-api-proxy/client-versions-refresh';
@@ -71,7 +74,7 @@ export async function refreshClientVersions(env: Bindings): Promise<ClientVersio
       await stub.setBuildNumberRecord(record);
       build = record;
     } catch (err: unknown) {
-      console.error('[client-versions] build_number persist failed:', err);
+      log.error('build_number persist failed:', err);
     }
   }
 
@@ -82,7 +85,7 @@ export async function refreshClientVersions(env: Bindings): Promise<ClientVersio
       await stub.setChromeVersionRecord(record);
       chrome = record;
     } catch (err: unknown) {
-      console.error('[client-versions] chrome major persist failed:', err);
+      log.error('chrome major persist failed:', err);
     }
   }
 
@@ -94,17 +97,17 @@ export async function scheduledClientVersionsHandler(env: Bindings): Promise<voi
   try {
     const { build, chrome } = await refreshClientVersions(env);
     if (build) {
-      console.log(`[client-versions] build_number refreshed: ${build.buildNumber}`);
+      log.info(`build_number refreshed: ${build.buildNumber}`);
     } else {
-      console.error('[client-versions] build_number not refreshed (scrape or persist failed); stored record untouched');
+      log.error('build_number not refreshed (scrape or persist failed); stored record untouched');
     }
     if (chrome) {
-      console.log(`[client-versions] chrome major refreshed: ${chrome.major}`);
+      log.info(`chrome major refreshed: ${chrome.major}`);
     } else {
-      console.error('[client-versions] chrome major not refreshed (scrape or persist failed); stored record untouched');
+      log.error('chrome major not refreshed (scrape or persist failed); stored record untouched');
     }
   } catch (err: unknown) {
-    console.error('[client-versions] scheduled handler errored:', err);
+    log.error('scheduled handler errored:', err);
   }
 }
 
@@ -121,12 +124,12 @@ async function scrapeBuildNumber(): Promise<number | null> {
       signal: AbortSignal.timeout(30_000),
     });
     if (!res.ok) {
-      console.error(`[client-versions] /login fetch returned ${res.status}`);
+      log.error(`/login fetch returned ${res.status}`);
       return null;
     }
     html = await res.text();
   } catch (err: unknown) {
-    console.error('[client-versions] /login fetch threw:', err);
+    log.error('/login fetch threw:', err);
     return null;
   }
 
@@ -147,7 +150,7 @@ async function scrapeBuildNumber(): Promise<number | null> {
 async function scrapeBuildNumberFromBundle(loginHtml: string): Promise<number | null> {
   const bundleMatch = loginHtml.match(/\/assets\/web\.[a-f0-9]+\.js/);
   if (!bundleMatch) {
-    console.error('[client-versions] no BUILD_NUMBER and no entry bundle URL found in /login HTML');
+    log.error('no BUILD_NUMBER and no entry bundle URL found in /login HTML');
     return null;
   }
   const bundleUrl = `https://discord.com${bundleMatch[0]}`;
@@ -159,23 +162,23 @@ async function scrapeBuildNumberFromBundle(loginHtml: string): Promise<number | 
       signal: AbortSignal.timeout(60_000),
     });
     if (!res.ok) {
-      console.error(`[client-versions] bundle fetch returned ${res.status}`);
+      log.error(`bundle fetch returned ${res.status}`);
       return null;
     }
     bundle = await res.text();
   } catch (err: unknown) {
-    console.error('[client-versions] bundle fetch threw:', err);
+    log.error('bundle fetch threw:', err);
     return null;
   }
 
   const buildMatch = bundle.match(/build_number:"(\d+)"/);
   if (!buildMatch) {
-    console.error('[client-versions] no build_number reference in bundle');
+    log.error('no build_number reference in bundle');
     return null;
   }
   const n = parseInt(buildMatch[1], 10);
   if (!Number.isFinite(n) || n <= 0) {
-    console.error('[client-versions] parsed build_number is not a positive integer:', buildMatch[1]);
+    log.error('parsed build_number is not a positive integer:', buildMatch[1]);
     return null;
   }
   return n;
@@ -187,23 +190,23 @@ async function scrapeChromeMajor(): Promise<number | null> {
   try {
     const res = await fetch(CHROME_VERSION_HISTORY_URL, { signal: AbortSignal.timeout(30_000) });
     if (!res.ok) {
-      console.error(`[client-versions] version-history fetch returned ${res.status}`);
+      log.error(`version-history fetch returned ${res.status}`);
       return null;
     }
     json = await res.json();
   } catch (err: unknown) {
-    console.error('[client-versions] version-history fetch threw:', err);
+    log.error('version-history fetch threw:', err);
     return null;
   }
 
   const versionString = extractFirstVersionString(json);
   if (typeof versionString !== 'string') {
-    console.error('[client-versions] version-history response missing versions[0].version');
+    log.error('version-history response missing versions[0].version');
     return null;
   }
   const major = parseInt(versionString.split('.')[0] ?? '', 10);
   if (!Number.isFinite(major) || major < 100 || major > 999) {
-    console.error('[client-versions] parsed Chrome major out of plausible range:', versionString);
+    log.error('parsed Chrome major out of plausible range:', versionString);
     return null;
   }
   return major;

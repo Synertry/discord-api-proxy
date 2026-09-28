@@ -35,6 +35,9 @@ import { inspectResponse } from '../../rotator/signals';
 import { IdentityBlockedError } from '../../rotator/static-guard';
 import type { StaticGuard } from '../../rotator/static-guard';
 import type { ReleaseInput, RouteKey } from '../../rotator/types';
+import { createLogger } from '../../logger';
+
+const log = createLogger('pager');
 
 export { IdentityBlockedError } from '../../rotator/static-guard';
 
@@ -158,7 +161,7 @@ async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOpti
     } catch (err: unknown) {
       if (lease) {
         await opts.guard?.settle(lease.requestId, { status: 599, routeKey: budgetRouteKey }).catch((cleanupErr: unknown) => {
-          console.error('paged-messages guard cleanup failed:', cleanupErr);
+          log.error('guard cleanup failed:', cleanupErr);
         });
       }
       const message = err instanceof Error ? err.message : String(err);
@@ -176,7 +179,7 @@ async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOpti
         await opts.guard?.settle(lease.requestId, outcome);
       } catch (err: unknown) {
         await opts.guard?.settle(lease.requestId, { status: 599, routeKey: budgetRouteKey }).catch((cleanupErr: unknown) => {
-          console.error('paged-messages guard cleanup failed:', cleanupErr);
+          log.error('guard cleanup failed:', cleanupErr);
         });
         throw err;
       }

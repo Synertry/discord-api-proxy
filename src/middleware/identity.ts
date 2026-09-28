@@ -51,6 +51,9 @@ import { resolveProfileId, resolveCustom } from '../fingerprint/profiles';
 import { hashToken } from '../rotator/token-hash';
 import { blockResponse, createStaticGuard } from '../rotator/static-guard';
 import type { IdentityBlock, RotatorVariables, Slot, StaticPrepareResult, StaticTokenKind, TokenPoolClient } from '../rotator/types';
+import { createLogger } from '../logger';
+
+const log = createLogger('identity');
 
 export const identityMiddleware = createMiddleware<{
   Bindings: Bindings;
@@ -79,7 +82,7 @@ export const identityMiddleware = createMiddleware<{
       client = createTokenPoolClient(stub);
       c.set('tokenPoolClient', client);
     } catch (err: unknown) {
-      console.error('TOKEN_POOL binding unavailable:', err);
+      log.error('TOKEN_POOL binding unavailable:', err);
       // Only fatal for the pool path; the static path below tolerates a missing client entirely.
       if (rotatable && selector !== 'auto') {
         return c.json({ error: 'token pool unavailable' }, 503);
@@ -178,7 +181,7 @@ async function safePrepareStatic(
   try {
     return await prepareStatic(identityHash, kind);
   } catch (err: unknown) {
-    console.error('prepareStatic failed:', err);
+    log.error('prepareStatic failed:', err);
     return { fingerprint: null, versions: { build: null, chrome: null }, block: null };
   }
 }

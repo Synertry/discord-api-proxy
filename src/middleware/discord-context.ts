@@ -27,6 +27,9 @@ import { createMiddleware } from 'hono/factory';
 import type { Bindings } from '../types';
 import type { AuthVariables } from './auth';
 import type { StaticTokenKind } from '../rotator/types';
+import { createLogger } from '../logger';
+
+const log = createLogger('discord-context');
 
 /** Discriminates the token kind for downstream header composition. */
 export type DiscordTokenKind = 'bot' | StaticTokenKind;
@@ -81,7 +84,7 @@ export const discordContextMiddleware = createMiddleware<{
     let kind: DiscordTokenKind;
     if (slot === 'premium') {
       if (!c.env.DISCORD_TOKEN_USER_PREMIUM) {
-        console.error('FATAL: AUTH_KEY_PREMIUM accepted but DISCORD_TOKEN_USER_PREMIUM is not configured');
+        log.error('FATAL: AUTH_KEY_PREMIUM accepted but DISCORD_TOKEN_USER_PREMIUM is not configured');
         return c.json({ error: 'Service misconfigured' }, 503);
       }
       userToken = c.env.DISCORD_TOKEN_USER_PREMIUM;

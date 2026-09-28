@@ -17,6 +17,9 @@
 
 import { createMiddleware } from 'hono/factory';
 import type { Bindings } from '../types';
+import { createLogger } from '../logger';
+
+const log = createLogger('auth');
 
 /**
  * Compares two strings in constant time to prevent timing-based attacks.
@@ -73,7 +76,7 @@ export type AuthVariables = {
  */
 export const authMiddleware = createMiddleware<{ Bindings: Bindings; Variables: AuthVariables }>(async (c, next) => {
   if (!c.env.AUTH_KEY) {
-    console.error('FATAL: AUTH_KEY binding is not configured');
+    log.error('FATAL: AUTH_KEY binding is not configured');
     return c.json({ error: 'Service misconfigured' }, 503);
   }
 

@@ -63,6 +63,9 @@ import { createTokenPoolClient, getPoolStub } from '../rotator/client';
 import type { AcquireResult, PoolPlan, ReleaseInput, RequestIdentity, RouteKey, Slot, TokenPoolClient } from '../rotator/types';
 import type { ClientVersions } from '../fingerprint/versions';
 import { TYPING_WAIT_DEFAULT_MAX_MS, parseTypingMaxMsHeader, typingSlicesMs, typingWaitMs } from './typing-delay';
+import { createLogger } from '../logger';
+
+const log = createLogger('proxy');
 
 /** Catch-all proxy route - forwards any unmatched request to the Discord API. */
 export const proxyRoute = new OpenAPIHono<{
@@ -169,7 +172,7 @@ proxyRoute.all('/*', async (c) => {
       try {
         client = createTokenPoolClient(getPoolStub(c.env, slot));
       } catch (err: unknown) {
-        console.error('TOKEN_POOL binding unavailable in proxy:', err);
+        log.error('TOKEN_POOL binding unavailable:', err);
       }
     }
 
@@ -264,7 +267,7 @@ proxyRoute.all('/*', async (c) => {
     } catch (err: unknown) {
       if (guard && mainLease && !mainSettled) {
         await guard.settle(mainLease.requestId, { status: 599, routeKey: budgetKey }).catch((cleanupErr: unknown) => {
-          console.error('PROXY guard cleanup failed:', cleanupErr);
+          log.error('guard cleanup failed:', cleanupErr);
         });
       }
       if (plan && client && poolLease && !poolReleased) {
@@ -272,14 +275,14 @@ proxyRoute.all('/*', async (c) => {
         // is exactly that budget key - the plan that produced this lease.
         await client.release(poolLease.label, poolLease.requestId, { status: 599, routeKey: plan.routeKey }).catch(
           (cleanupErr: unknown) => {
-            console.error('PROXY pool release cleanup failed:', cleanupErr);
+            log.error('pool release cleanup failed:', cleanupErr);
           },
         );
       }
       throw err;
     }
   } catch (err: unknown) {
-    console.error('PROXY ERR:', err);
+    log.error('unhandled error:', err);
     return c.json({ error: 'Proxy error' }, 500);
   }
 });
@@ -441,7 +444,7 @@ async function attemptPoolAcquire(client: TokenPoolClient, plan: PoolPlan): Prom
     }
     return { kind: 'fallback' };
   } catch (err: unknown) {
-    console.error('TOKEN_POOL acquire failed:', err);
+    log.error('TOKEN_POOL acquire failed:', err);
     return { kind: 'blocked', response: (c) => c.json({ error: 'token pool unavailable' }, 503) };
   }
 }
@@ -500,10 +503,10 @@ async function dispatchTyping(args: {
     } catch (err: unknown) {
       if (!settled) {
         await args.guard.settle(lease.requestId, { status: 599, routeKey: typingRouteKey }).catch((cleanupErr: unknown) => {
-          console.error('PROXY typing guard cleanup failed:', cleanupErr);
+          log.error('typing guard cleanup failed:', cleanupErr);
         });
       }
-      console.error('PROXY typing dispatch failed:', err);
+      log.error('typing dispatch failed:', err);
     }
     return true;
   }
@@ -519,7 +522,7 @@ async function dispatchTyping(args: {
     const response = await dispatch(args.fetcher, typingUrl, 'POST', headers, undefined);
     await response.body?.cancel();
   } catch (err: unknown) {
-    console.error('PROXY typing dispatch failed:', err);
+    log.error('typing dispatch failed:', err);
   }
   return true;
 }
@@ -571,7 +574,7 @@ async function retryPool(args: {
     return retryResponse;
   } catch (err: unknown) {
     await args.client.release(retry.label, retry.requestId, { status: 599, routeKey: args.plan.routeKey }).catch((cleanupErr: unknown) => {
-      console.error('PROXY retryPool release cleanup failed:', cleanupErr);
+      log.error('retryPool release cleanup failed:', cleanupErr);
     });
     throw err;
   }
