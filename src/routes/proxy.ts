@@ -39,9 +39,11 @@
  * in `fingerprint/headers.ts` - `cf-*`, `x-forwarded-*`, and the caller's own
  * `user-agent`/`accept*` never reach Discord), `nonce`/`tts`/`flags` fill on a
  * JSON `POST /channels/:id/messages` body, and an opt-in typing indicator
- * (`X-Proxy-Typing: on`, default off) sequenced with an explicit wait before
- * the main dispatch so it clears the identity-wide dispatch-gap floor
- * (`MIN_DISPATCH_GAP_MS` in `rotator/budget.ts`).
+ * (`X-Proxy-Typing: on`, default off) sequenced with a humanized wait before
+ * the main dispatch (`routes/typing-delay.ts`), re-sent at randomized
+ * intervals when `X-Proxy-Typing-Max-Ms` allows a wait longer than one
+ * indicator window. Every wait is at least the identity-wide dispatch-gap
+ * floor (`MIN_DISPATCH_GAP_MS` in `rotator/budget.ts`).
  */
 
 import { OpenAPIHono } from '@hono/zod-openapi';
@@ -60,6 +62,7 @@ import { deriveBudgetKey, deriveRouteKey, extractGuildId } from '../rotator/buck
 import { createTokenPoolClient, getPoolStub } from '../rotator/client';
 import type { AcquireResult, PoolPlan, ReleaseInput, RequestIdentity, RouteKey, Slot, TokenPoolClient } from '../rotator/types';
 import type { ClientVersions } from '../fingerprint/versions';
+import { TYPING_WAIT_DEFAULT_MAX_MS, parseTypingMaxMsHeader, typingSlicesMs, typingWaitMs } from './typing-delay';
 
 /** Catch-all proxy route - forwards any unmatched request to the Discord API. */
 export const proxyRoute = new OpenAPIHono<{
@@ -141,6 +144,15 @@ proxyRoute.all('/*', async (c) => {
       }
     }
 
+    // ---- Typing controls (opt-in). Validated before any lease is taken so a bad header is rejected with nothing to release. ----
+    const typingOn = routeKey === MESSAGE_SEND_ROUTE && messageContent !== undefined && c.req.header('X-Proxy-Typing') === 'on';
+    let typingMaxMs = TYPING_WAIT_DEFAULT_MAX_MS;
+    if (typingOn) {
+      const parsed = parseTypingMaxMsHeader(c.req.header('X-Proxy-Typing-Max-Ms'));
+      if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+      typingMaxMs = parsed.maxMs;
+    }
+
     // ---- Bot: no identity, no guard, no pool. ----
     if (kind === 'bot') {
       const headers = await composeRequestHeaders({ token: c.var.discordToken, tokenKind: 'bot', buildHash: BUILD_HASH, inbound: c.req.raw.headers });
@@ -184,11 +196,16 @@ proxyRoute.all('/*', async (c) => {
     const guard: StaticGuard | undefined = usingPool ? undefined : c.var.staticGuard;
 
     // ---- Typing (opt-in; only for a real, non-empty message send). ----
-    let typingDispatched = false;
-    if (routeKey === MESSAGE_SEND_ROUTE && messageContent && c.req.header('X-Proxy-Typing') === 'on') {
-      typingDispatched = await dispatchTyping({ fetcher, path, identity, versions, guard, token, kind });
-      if (typingDispatched) {
-        await wait(typingWaitMs(messageContent.length));
+    if (typingOn && messageContent) {
+      const typingArgs = { fetcher, path, identity, versions, guard, token, kind };
+      if (await dispatchTyping(typingArgs)) {
+        const slices = typingSlicesMs(typingWaitMs(messageContent, typingMaxMs));
+        for (let i = 0; i < slices.length; i++) {
+          // Re-send /typing before every slice after the first so the indicator never lapses mid-compose; a blocked
+          // re-trigger stops re-triggering and falls through to the send, whose own lease decides.
+          if (i > 0 && !(await dispatchTyping(typingArgs))) break;
+          await wait(slices[i]);
+        }
       }
     }
 
@@ -371,11 +388,6 @@ function applyContextProperties(headers: Headers, routeKey: RouteKey): void {
   if (headers.has('X-Context-Properties')) return;
   const contextProperties = contextPropertiesFor(routeKey);
   if (contextProperties) headers.set('X-Context-Properties', contextProperties);
-}
-
-/** Pre-send typing delay: a rough humanized read of `600ms + 55ms/char`, clamped to 1-4s, plus up to 400ms of jitter. */
-function typingWaitMs(contentLength: number): number {
-  return Math.max(1000, Math.min(4000, 600 + 55 * contentLength) + Math.floor(Math.random() * 400));
 }
 
 type PoolAcquireOutcome =

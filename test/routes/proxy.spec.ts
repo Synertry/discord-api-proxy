@@ -393,6 +393,108 @@ describe('Proxy Route (message-send body fill and opt-in typing)', () => {
     expect(callUrl(mockFetch, 0)).toContain('/messages');
   });
 
+  describe('typing delay length and X-Proxy-Typing-Max-Ms', () => {
+    // 200 typed characters take at least 400 + 200 * 120 = 24400ms, so every
+    // case below hits its ceiling regardless of the random draws.
+    const longContent = 'a'.repeat(200);
+
+    function typingRequest(extraHeaders: Record<string, string> = {}): Request {
+      return new Request(messagesUrl(), {
+        method: 'POST',
+        headers: {
+          'x-auth-key': 'secret-key',
+          'x-proxy-context': 'user',
+          'content-type': 'application/json',
+          'X-Proxy-Typing': 'on',
+          ...extraHeaders,
+        },
+        body: JSON.stringify({ content: longContent }),
+      });
+    }
+
+    function typingFetch() {
+      return vi.fn().mockImplementation(async (url: string) => {
+        if (url.endsWith('/typing')) return new Response(null, { status: 204 });
+        return jsonResponse({ id: '1' });
+      });
+    }
+
+    it('caps the wait at one 8s indicator window with a single /typing call by default', async () => {
+      const mockFetch = typingFetch();
+      const waitedMs: number[] = [];
+      const app = createApp(mockFetch as unknown as typeof fetch, undefined, async (ms: number) => {
+        waitedMs.push(ms);
+      });
+      const res = await app.request(typingRequest(), undefined, MOCK_ENV);
+      expect(res.status).toBe(200);
+      expect(mockFetch.mock.calls.map((call) => new URL(call[0] as string).pathname.split('/').pop())).toEqual(['typing', 'messages']);
+      expect(waitedMs).toEqual([8000]);
+    });
+
+    it('with a longer max, re-sends /typing at a randomized 5-8s point so the indicator never lapses', async () => {
+      const mockFetch = typingFetch();
+      const waitedMs: number[] = [];
+      const app = createApp(mockFetch as unknown as typeof fetch, undefined, async (ms: number) => {
+        waitedMs.push(ms);
+      });
+      const res = await app.request(typingRequest({ 'X-Proxy-Typing-Max-Ms': '9000' }), undefined, MOCK_ENV);
+      expect(res.status).toBe(200);
+      expect(mockFetch.mock.calls.map((call) => new URL(call[0] as string).pathname.split('/').pop())).toEqual([
+        'typing',
+        'typing',
+        'messages',
+      ]);
+      expect(waitedMs).toHaveLength(2);
+      expect(waitedMs[0]).toBeGreaterThanOrEqual(5000);
+      expect(waitedMs[0]).toBeLessThan(8000);
+      expect(waitedMs[1]).toBeGreaterThanOrEqual(1000);
+      expect(waitedMs[0] + waitedMs[1]).toBe(9000);
+    });
+
+    it('rejects an out-of-range X-Proxy-Typing-Max-Ms with 400 before dispatching anything', async () => {
+      const mockFetch = typingFetch();
+      const app = createApp(mockFetch as unknown as typeof fetch, undefined, async () => undefined);
+      const res = await app.request(typingRequest({ 'X-Proxy-Typing-Max-Ms': '500' }), undefined, MOCK_ENV);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'invalid X-Proxy-Typing-Max-Ms: expected an integer between 1000 and 30000' });
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('stops re-triggering when a typing re-trigger is guard-blocked, and still sends through its own lease', async () => {
+      let typingLeases = 0;
+      let leases = 0;
+      const lease = vi.fn(async (_identityHash: string, routeKey: string) => {
+        if (routeKey.endsWith('/typing') && ++typingLeases === 2) {
+          return { ok: false as const, block: { reason: 'cooldown' as const, retryAfter: 1000 } };
+        }
+        return { ok: true as const, requestId: `lease-${++leases}` };
+      });
+      const settle = vi.fn(async (_identityHash: string, _requestId: string, _outcome: ReleaseInput) => undefined);
+      const client: TokenPoolClient = {
+        acquire: async () => ({ ok: false, reason: 'empty-pool', retryAfter: 0 }),
+        release: async () => undefined,
+        prepareStatic: async () => ({ fingerprint: null, versions: { build: null, chrome: null }, block: null }),
+        leaseStatic: lease,
+        settleStatic: settle,
+      };
+      const mockFetch = typingFetch();
+      const waitedMs: number[] = [];
+      const app = createApp(mockFetch as unknown as typeof fetch, client, async (ms: number) => {
+        waitedMs.push(ms);
+      });
+      const res = await app.request(typingRequest({ 'X-Proxy-Typing-Max-Ms': '9000' }), undefined, MOCK_ENV);
+      expect(res.status).toBe(200);
+      expect(mockFetch.mock.calls.map((call) => new URL(call[0] as string).pathname.split('/').pop())).toEqual(['typing', 'messages']);
+      expect(waitedMs).toHaveLength(1);
+      expect(lease.mock.calls.map((call) => call[1])).toEqual([
+        'POST:/channels/123456789012345678/typing',
+        'POST:/channels/123456789012345678/typing',
+        'POST:/channels/123456789012345678/messages',
+      ]);
+      expect(settle.mock.calls.map((call) => call[1])).toEqual(['lease-1', 'lease-2']);
+    });
+  });
+
   it('recomputes Content-Length after filling nonce/tts/flags grows the body', async () => {
     const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: '1' }));
     const app = createApp(mockFetch as unknown as typeof fetch);
