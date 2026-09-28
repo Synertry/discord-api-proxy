@@ -239,10 +239,10 @@ describe('identityMiddleware', () => {
       prepareStatic: async () => ({ ...EMPTY_PREPARE, block: { reason: 'cooldown', retryAfter: 1_800_000, signal: 'captcha' } }),
     });
     const app = buildApp({ client });
-    // Bingo is pool-only: it never leases the static guard, so a static
-    // captcha circuit must not reject the request before its handler runs
-    // (the request itself is rejected at the pool, not here).
-    const res = await app.request('/custom/chillzone/events/bingo/participant/987654321098765432/counts', {}, MOCK_ENV);
+    // Custom handlers lease at their own point of use, so a static circuit
+    // must not pre-block the request before the handler runs (a pool-only
+    // handler never touches the static identity at all).
+    const res = await app.request('/custom/anything/at/all', {}, MOCK_ENV);
     expect(res.status).toBe(200);
     expect(res.headers.get('X-Proxy-Block')).toBeNull();
   });

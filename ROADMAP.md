@@ -4,12 +4,12 @@ Open work, deliberately deferred decisions, and follow-up items that didn't make
 
 ## Token rotator (post-PR-#47)
 
-Multi-token Discord user-token rotator landed in PR #47. v1 covers the proxy, bingo migration, admin API, and per-Discord-bucket cooldown tracking. v1 operational rollout is complete (token pool registered in prod, bingo refresh validated, `/admin/health` confirmed healthy).
+Multi-token Discord user-token rotator landed in PR #47. v1 covers the proxy, the custom routes of the time, the admin API, and per-Discord-bucket cooldown tracking. v1 operational rollout is complete (token pool registered in prod, custom-route refresh validated, `/admin/health` confirmed healthy).
 
 ### Deliberately deferred (v2+ candidates)
 
 - [ ] **Per-slot DO sharding.** Pool is a single `idFromName('token-pool-v1')` instance today. The `getPoolStub(env, slot?)` factory pre-bakes the sharding option (one-file flip to `token-pool-default` / `token-pool-premium`). Trigger to ship: ~50 concurrent in-flight requests with P99 RPC latency >50ms, OR DO CPU time pressure. Any new RPC method returns a result object (`{ ok: true, ... } | { ok: false, reason }`) instead of throwing; a thrown error inside a DO RPC surfaces as an unhandled-rejection echo in workerd logs.
-- [ ] **Bulk acquire API.** Would help a consumer that needs N tokens for N concurrent sub-fetches inside one proxy request. Bingo is sequential and doesn't need it. Reconsider if a new consumer wants parallel fanout per call.
+- [ ] **Bulk acquire API.** Would help a consumer that needs N tokens for N concurrent sub-fetches inside one proxy request. Every current consumer is sequential. Reconsider if a new consumer wants parallel fanout per call.
 - [ ] **Egress-IP rotation layer.** Orthogonal to the rotator. Only matters if we ever observe CF-level 1015s from the shared Cloudflare egress IP. Today's per-token-per-bucket rotation is sufficient.
 - [ ] **`X-Pool-Token-Label` audit response header.** Flagged during security review as a nice-to-have for incident response. Defer until a concrete incident asks for it.
 - [ ] **Published `@synertry/discord-rotator-types` package.** Cross-codebase consumers currently copy-paste `src/rotator/types.ts`. Publish when there are 2+ active consumers OR the types drift in a way that bites someone.

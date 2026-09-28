@@ -8,10 +8,8 @@
 
 /**
  * @module custom/shared/paged-messages.spec
- * Covers `fetchAllMessages` (basic pagination, ported from the former
- * per-event kindness-cascade/hear-me-out discord-client.spec.ts files, now
- * deleted) plus the pacing, guard, and retry behaviors unique to the shared
- * pager.
+ * Covers `fetchAllMessages`: basic pagination plus the pacing, guard, and
+ * retry behaviors of the shared pager.
  */
 
 import { describe, it, expect, vi } from 'vitest';

@@ -8,50 +8,27 @@
 
 /**
  * @module routes/custom
- * Custom business logic routes that are not direct Discord API proxies.
+ * Router for `/custom/*`: server-side endpoints that process Discord data
+ * (event tallies, analytics, aggregations) instead of forwarding one call.
  *
- * Mounts server-specific event endpoints under `/custom/chillzone/events/`.
- * These routes implement tallying, analytics, and other features that process
- * Discord data server-side rather than simply forwarding API calls.
+ * Ships as a skeleton with no feature mounted. To add one:
+ *
+ * 1. Create `src/custom/<scope>/<feature>/` with a `handler.ts` exporting an
+ *    `OpenAPIHono` sub-app built from `createRoute` definitions.
+ * 2. Read channel history through `custom/shared/paged-messages`
+ *    (`fetchAllMessages`) rather than a hand-rolled fetch loop, and lease the
+ *    static guard or acquire a pool token immediately before every other
+ *    outbound fetch.
+ * 3. Mount it below with `customRoutes.route('/<scope>/<feature>', featureRoutes)`,
+ *    above the trailing catch-all.
  */
 
-import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
+import { OpenAPIHono } from '@hono/zod-openapi';
 import type { Bindings } from '../types';
 import type { DiscordContextVariables } from '../middleware/discord-context';
-import { kindnessCascadeRoutes } from '../custom/chillzone/events/kindness-cascade';
-import { bingoRoutes } from '../custom/chillzone/events/bingo';
-import { hearMeOutRoutes } from '../custom/chillzone/events/hear-me-out';
 
 /** Parent router for all custom (non-proxy) endpoints. */
 export const customRoutes = new OpenAPIHono<{ Bindings: Bindings; Variables: DiscordContextVariables }>();
 
-/** Placeholder route for the Cupid's Inbox event (not yet implemented). */
-const cupidsInboxRoute = createRoute({
-  method: 'get',
-  path: '/chillzone/events/cupids-inbox',
-  responses: {
-    200: {
-      content: {
-        'application/json': {
-          schema: z.object({
-            tally: z.number(),
-          }),
-        },
-      },
-      description: "Retrieve Cupid's Inbox tally placeholder",
-    },
-  },
-});
-
-customRoutes.openapi(cupidsInboxRoute, (c) => {
-  return c.json({ tally: 0 }, 200);
-});
-
-// Mount Kindness Cascade routes under /chillzone/events/
-customRoutes.route('/chillzone/events', kindnessCascadeRoutes);
-
-// Mount Hear Me Out routes under /chillzone/events/
-customRoutes.route('/chillzone/events', hearMeOutRoutes);
-
-// Mount Bingo autotally routes under /chillzone/events/bingo/
-customRoutes.route('/chillzone/events/bingo', bingoRoutes);
+/** Unmatched /custom/* paths stop here: they are never forwarded to Discord and never spend a guard lease. */
+customRoutes.all('*', (c) => c.json({ error: 'Not Found' }, 404));

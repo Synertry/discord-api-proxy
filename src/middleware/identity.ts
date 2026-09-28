@@ -95,10 +95,10 @@ export const identityMiddleware = createMiddleware<{
   // it here would wrongly reject a request the pool has plenty of capacity
   // for, just because the unrelated static identity happens to be circuited.
   //
-  // `/custom/*` is exempt for the same reason: those handlers lease at their
+  // `/custom/*` is exempt for the same reason: custom handlers lease at their
   // own point of use (the shared pager leases the static guard and reports
-  // the block itself; bingo uses the pool only), so a static circuit must
-  // not pre-block a pool-only endpoint before its handler ever runs.
+  // the block itself; a pool-only handler never touches the static identity),
+  // so a static circuit must not pre-block the request before the handler runs.
   const isCustomRoute = c.req.path === '/custom' || c.req.path.startsWith('/custom/');
   if (block && !rotatable && !isCustomRoute) {
     return blockResponse(c, block);

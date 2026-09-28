@@ -25,8 +25,8 @@ import type { RegisterInput, Slot, TokenState } from './types';
  *      on every acquire. At 20 this is sub-millisecond; at 200 it starts
  *      mattering inside the serialized event loop.
  *   3) Practical sufficiency. Discord per-token-per-bucket is typically 5/5s;
- *      20 tokens * 5/5s = ~20 req/s on a single rotatable route. Bingo /counts
- *      (12-15 sub-requests) finishes inside one bucket window even at pool=2.
+ *      20 tokens * 5/5s = ~20 req/s on a single rotatable route, ample for
+ *      sequential consumers that fan out a dozen sub-requests per call.
  *
  * One-line bump if a real need shows up.
  */

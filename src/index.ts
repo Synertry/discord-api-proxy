@@ -50,7 +50,7 @@ export { TokenPoolDO } from './rotator/do';
  * 4. **Snowflake validation** - Validates Discord IDs in URL path segments
  * 5. **Identity resolution** - Read-only fingerprint/versions + pool plan (no DO round trip on a malformed path)
  * 6. **Subrequest logger** - Wraps `proxyFetch` for streaming visibility
- * 7. **Custom routes** - Business logic endpoints (e.g. Kindness Cascade)
+ * 7. **Custom routes** - Business logic endpoints mounted under /custom
  * 8. **Proxy forwarder** - Catch-all that forwards to Discord API
  *
  * @param mockFetch - Optional fetch override for integration tests.

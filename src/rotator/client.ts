@@ -11,7 +11,7 @@
  * Worker-side wrapper around the TokenPoolDO RPC interface.
  *
  * The factory `createTokenPoolClient` produces a `TokenPoolClient` that other
- * modules (middleware, bingo discord-client, admin routes) consume through a
+ * modules (middleware, custom-route clients, admin routes) consume through a
  * stable interface. Tests inject a `vi.fn()`-backed client via
  * `createApp(_, mockTokenPool)` instead of constructing one from a real DO.
  *

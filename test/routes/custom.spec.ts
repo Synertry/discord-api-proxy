@@ -8,33 +8,31 @@
 
 /**
  * @module routes/custom.spec
- * Tests for the custom business logic route tree.
- *
- * Verifies the placeholder Cupid's Inbox endpoint and that the Kindness Cascade
- * route is mounted and validates its required query parameters.
+ * Tests for the custom route skeleton: with no feature module mounted, every
+ * `/custom/*` path is answered by the router itself and never forwarded to
+ * Discord.
  */
 
-import { describe, it, expect } from 'vitest';
-import { customRoutes } from '../../src/routes/custom';
+import { describe, it, expect, vi } from 'vitest';
+import { createApp } from '../../src/index';
 import type { Bindings } from '../../src/types';
 
+const MOCK_ENV: Bindings = {
+  AUTH_KEY: 'secret-key',
+  DISCORD_TOKEN_BOT: 'bot-token',
+  DISCORD_TOKEN_USER: 'user-token',
+  TOKEN_POOL: {} as DurableObjectNamespace,
+};
+
 describe('Custom Routes', () => {
-  /** Test environment bindings. */
-  const MOCK_ENV: Bindings = {
-    AUTH_KEY: 'secret-key',
-    DISCORD_TOKEN_BOT: 'bot-token',
-    DISCORD_TOKEN_USER: 'user-token',
-  };
+  it.each(['/custom/anything/at/all', '/custom'])('answers 404 for unmatched %s without forwarding it to Discord', async (path) => {
+    const mockFetch = vi.fn(async () => new Response('{}', { status: 200 }));
+    const app = createApp(mockFetch as unknown as typeof fetch);
 
-  it('should return placeholder tally for /chillzone/events/cupids-inbox', async () => {
-    const res = await customRoutes.request('http://localhost/chillzone/events/cupids-inbox', {}, MOCK_ENV);
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual({ tally: 0 });
-  });
+    const res = await app.request(`http://localhost${path}`, { headers: { 'x-auth-key': 'secret-key' } }, MOCK_ENV);
 
-  it('should return 400 for /chillzone/events/kindness-cascade without required params', async () => {
-    const res = await customRoutes.request('http://localhost/chillzone/events/kindness-cascade', {}, MOCK_ENV);
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'Not Found' });
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
