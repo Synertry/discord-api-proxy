@@ -22,6 +22,9 @@
 
 import { extractReleaseInput } from './release-input';
 import type { ReleaseInput, RouteKey } from './types';
+import { createLogger } from '../logger';
+
+const log = createLogger('signals');
 
 /** Status codes worth inspecting the body for; everything else is passed through unchanged by `extractReleaseInput` alone. */
 const INSPECTABLE_STATUSES: Readonly<Record<number, true>> = { 400: true, 403: true, 429: true, 503: true };
@@ -77,7 +80,7 @@ export async function inspectResponse(response: Response, routeKey: RouteKey, gu
   try {
     text = await readCappedText(response.clone().body, MAX_INSPECTABLE_BYTES);
   } catch (err: unknown) {
-    console.error('inspectResponse body read failed, skipping signal inspection:', err);
+    log.error('inspectResponse body read failed, skipping signal inspection:', err);
     return base;
   }
   if (text === null || text.length === 0) return base;

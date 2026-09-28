@@ -58,6 +58,9 @@ import type {
   TokenStatus,
   TokenSummary,
 } from './types';
+import { createLogger } from '../logger';
+
+const log = createLogger('token-pool');
 
 export const TOKEN_KEY_PREFIX = 'token:';
 export const STATIC_FINGERPRINT_PREFIX = 'static-fingerprint:';
@@ -327,7 +330,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
     // which is DO-wide - a bogus release must never be able to trip it).
     const lease = t.leases.find((l) => l.requestId === requestId);
     if (!lease || lease.routeKey !== outcome.routeKey) {
-      console.error('IDENTITY_GUARD release requestId/routeKey mismatch or unknown, dropping', {
+      log.error('IDENTITY_GUARD release requestId/routeKey mismatch or unknown, dropping', {
         identity: `pool:${label}`,
         requestId,
         routeKey: outcome.routeKey,
@@ -355,7 +358,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
     t.circuit = budgetAfter.circuit;
     t.leases = budgetAfter.leases;
     if (!budgetBefore && t.circuit) {
-      console.error('IDENTITY_GUARD circuit opened', { identity: `pool:${label}`, signal: t.circuit.signal, until: t.circuit.until });
+      log.error('IDENTITY_GUARD circuit opened', { identity: `pool:${label}`, signal: t.circuit.signal, until: t.circuit.until });
     }
 
     // 50001 Missing Access in a guild -> mark token ineligible for that guild
@@ -438,7 +441,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
       return { ok: false, block: { reason: 'cooldown', retryAfter: eligibility.retryAfter, signal: eligibility.signal } };
     }
     if (guard.leases.length >= PENDING_LEASE_CAP) {
-      console.error('IDENTITY_GUARD pending-lease cap reached', { identity: `static:${identityHash.slice(0, 8)}`, cap: PENDING_LEASE_CAP });
+      log.error('IDENTITY_GUARD pending-lease cap reached', { identity: `static:${identityHash.slice(0, 8)}`, cap: PENDING_LEASE_CAP });
       return { ok: false, block: { reason: 'capacity', retryAfter: 1000 } };
     }
 
@@ -471,7 +474,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
 
     const lease = guard.leases.find((l) => l.requestId === requestId);
     if (!lease || lease.routeKey !== outcome.routeKey) {
-      console.error('IDENTITY_GUARD settle requestId/routeKey mismatch or unknown, dropping', {
+      log.error('IDENTITY_GUARD settle requestId/routeKey mismatch or unknown, dropping', {
         identity: `static:${identityHash.slice(0, 8)}`,
         requestId,
         routeKey: outcome.routeKey,
@@ -488,7 +491,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
     guard.leases = after.leases;
     guard.lastSeenAt = now;
     if (!before && guard.circuit) {
-      console.error('IDENTITY_GUARD circuit opened', {
+      log.error('IDENTITY_GUARD circuit opened', {
         identity: `static:${identityHash.slice(0, 8)}`,
         signal: guard.circuit.signal,
         until: guard.circuit.until,
@@ -653,7 +656,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
     const next = openUpstreamCircuit(existing, outcome, now);
     if (next === existing) return;
     if (!existing && next) {
-      console.error('IDENTITY_GUARD circuit opened', { identity: 'upstream (DO-wide)', signal: next.signal, until: next.until });
+      log.error('IDENTITY_GUARD circuit opened', { identity: 'upstream (DO-wide)', signal: next.signal, until: next.until });
     }
     if (next) {
       await this.ctx.storage.put(META_UPSTREAM_CIRCUIT_KEY, next);

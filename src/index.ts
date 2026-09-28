@@ -36,6 +36,9 @@ import { buildHealthcheckRoute } from './routes/healthcheck';
 import { scheduledClientVersionsHandler } from './scheduled/client-versions-refresh';
 
 import type { RotatorVariables, TokenPoolClient } from './rotator/types';
+import { createLogger } from './logger';
+
+const log = createLogger('app');
 
 // Re-export Durable Object class for the wrangler binding to discover.
 export { TokenPoolDO } from './rotator/do';
@@ -150,7 +153,7 @@ export function createApp(mockFetch?: typeof fetch, mockTokenPool?: TokenPoolCli
 
   /** Global error handler - logs full error internally, returns generic message to client. */
   app.onError((err, c) => {
-    console.error('HONO ERROR:', err);
+    log.error('unhandled error:', err);
     return c.json({ error: 'Internal Server Error' }, 500);
   });
 

@@ -29,12 +29,6 @@ Realistic per-identity fingerprinting, header allowlisting, and an identity guar
 - [ ] **`CF-Worker` / `CF-Connecting-IP` on cross-zone subrequests.** Cloudflare platform behavior on Worker-to-Worker-zone requests; not something request code can suppress.
 - [ ] **Per-request grease rotation.** `Sec-CH-UA`'s greased brand is fixed per Chrome major (matching a real client's per-launch, not per-request, grease selection) rather than rotated every call. Matches real client behavior; not a gap unless a specific detection vector is found.
 
-## Cross-cutting tech debt (out of scope for the rotator)
-
-These predate the rotator and are tracked separately. Listed here so they don't fall off the radar.
-
-- [ ] **`console.log` calls in production paths.** Violates the TypeScript coding standard. Audit and route through a proper logger.
-
 ## Closed experiments (do not re-attempt without re-checking)
 
 - **`bun --bun ./node_modules/wrangler/bin/wrangler.js ...` for CI deploy commands** - tried in PR #53, silently broke `wrangler versions upload` (banner prints, exit 0, no upload). Root cause: wrangler's `bin/wrangler.js` entry re-spawns the dist CLI via `process.execPath` with node-only flags (`--no-warnings`, `--experimental-vm-modules`); under Bun the child becomes `bun --no-warnings --experimental-vm-modules .../cli.js` and Bun's Node-API emulation isn't deep enough for the upload path. Reverted to the PR #38 pattern (`actions/setup-node@v6.4.0` + `node ./node_modules/wrangler/bin/wrangler.js ...`) in PR #55. Don't re-attempt without verifying `wrangler versions upload` succeeds on CI first.

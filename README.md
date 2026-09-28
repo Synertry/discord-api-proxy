@@ -186,6 +186,7 @@ src/
   index.ts                    App factory + middleware sieve + sub-app mounting
   types.ts                    Shared type definitions (Bindings, DiscordUser)
   global.d.ts                 Build-time constants (BUILD_HASH, BUILD_TIMESTAMP)
+  logger.ts                   createLogger(scope): every server-side log line, prefixed [scope]
   middleware/
     auth.ts                   API key authentication (sets authSlot)
     discord-context.ts        Static-token selection + discordTokenKind
@@ -248,7 +249,7 @@ A feature module lives at `src/custom/<scope>/<feature>/` with `handler.ts` (an 
 ## Testing
 
 ```bash
-bun run test           # Run all 516 tests across 29 suites
+bun run test           # Run all 564 tests across 30 suites
 bun run test -- --ui   # Open Vitest UI
 ```
 
