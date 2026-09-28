@@ -33,7 +33,6 @@ Realistic per-identity fingerprinting, header allowlisting, and an identity guar
 
 These predate the rotator and are tracked separately. Listed here so they don't fall off the radar.
 
-- [ ] **`[subreq]` middleware logs full URLs including query params.** Token-bearing or PII-bearing query params (search queries, `author_id`, ...) end up in logs. Strip or hash before logging.
 - [ ] **`console.log` calls in production paths.** Violates the TypeScript coding standard. Audit and route through a proper logger.
 
 ## Closed experiments (do not re-attempt without re-checking)

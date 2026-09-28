@@ -70,6 +70,13 @@ describe('subrequestLoggerMiddleware', () => {
 	it.each([
 		['webhook', 'https://discord.com/api/v10/webhooks/123456789012345678/SeCrEtToKeN-1/messages/@original?wait=true', '/webhooks/123456789012345678/:token/messages/@original?wait=true'],
 		['interaction', 'https://discord.com/api/v10/interactions/123456789012345678/SeCrEtToKeN-1/callback', '/interactions/123456789012345678/:token/callback'],
+		[
+			'percent-encoded webhook id',
+			'https://discord.com/api/v10/webhooks/%3123456789012345678/SeCrEtToKeN-1/messages',
+			'/webhooks/%3123456789012345678/:token/messages',
+		],
+		['percent-encoded webhooks marker', 'https://discord.com/api/v10/%77ebhooks/123456789012345678/SeCrEtToKeN-1', '/%77ebhooks/123456789012345678/:token'],
+		['invite code', 'https://discord.com/api/v10/invites/SeCrEtToKeN-1?with_counts=true', '/invites/:code?with_counts=<redacted>'],
 	])('never writes a %s token to the log', async (_kind, target, expected) => {
 		const innerFetch = vi.fn(async () => new Response('ok', { status: 200 })) as unknown as typeof fetch;
 		const app = buildApp(innerFetch, target);
@@ -78,5 +85,47 @@ describe('subrequestLoggerMiddleware', () => {
 		const line = logSpy.mock.calls[0][0] as string;
 		expect(line).not.toContain('SeCrEtToKeN');
 		expect(line).toContain(expected);
+	});
+
+	it('redacts query values other than paging cursors and limits', async () => {
+		const innerFetch = vi.fn(async () => new Response('ok', { status: 200 })) as unknown as typeof fetch;
+		const target =
+			'https://discord.com/api/v10/guilds/123456789012345678/messages/search?author_id=987654321098765432&content=hello%20there&limit=25&max_id=111111111111111111';
+		const app = buildApp(innerFetch, target);
+
+		await app.request('http://localhost/probe');
+		const line = logSpy.mock.calls[0][0] as string;
+		expect(line).toContain('/guilds/123456789012345678/messages/search?author_id=<redacted>&content=<redacted>&limit=25&max_id=111111111111111111');
+		expect(line).not.toContain('987654321098765432');
+		expect(line).not.toContain('hello');
+	});
+
+	it('redacts a value under an allowlisted key unless it is a plain number or boolean, and masks unknown keys, so caller text cannot hide there', async () => {
+		const innerFetch = vi.fn(async () => new Response('ok', { status: 200 })) as unknown as typeof fetch;
+		const target =
+			'https://discord.com/api/v10/channels/123456789012345678/messages?before=private-text&limit=secret&wait=%0Aforged%20line&after=222222222222222222&bad%0Akey=1';
+		const app = buildApp(innerFetch, target);
+
+		await app.request('http://localhost/probe');
+		const line = logSpy.mock.calls[0][0] as string;
+		expect(line).toContain(
+			'/channels/123456789012345678/messages?before=<redacted>&limit=<redacted>&wait=<redacted>&after=222222222222222222&<key>=<redacted>',
+		);
+		expect(line).not.toMatch(/private|secret|forged|bad|\n/);
+	});
+
+	it.each([
+		['an empty segment before an invite code', 'https://discord.com/api/v10/invites//secret-code', '/invites//:code', /secret/],
+		['an encoded separator hiding a webhook marker', 'https://discord.com/api/v10/webhooks%2F123456789012345678/secret-token', '/:opaque/:opaque', /secret|webhooks/],
+		['caller text in an arbitrary segment', 'https://discord.com/api/v10/channels/123456789012345678/Private%20Text', '/channels/123456789012345678/:opaque', /Private/],
+		['a lowercase key that is not a Discord parameter', 'https://discord.com/api/v10/users/@me?privatecode=1&limit=5', '/users/@me?<key>=<redacted>&limit=5', /privatecode/],
+	])('masks %s', async (_kind, target, expected, forbidden) => {
+		const innerFetch = vi.fn(async () => new Response('ok', { status: 200 })) as unknown as typeof fetch;
+		const app = buildApp(innerFetch, target);
+
+		await app.request('http://localhost/probe');
+		const line = logSpy.mock.calls[0][0] as string;
+		expect(line).toContain(expected);
+		expect(line).not.toMatch(forbidden);
 	});
 });
