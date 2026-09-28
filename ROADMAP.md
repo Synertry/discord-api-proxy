@@ -15,7 +15,6 @@ Multi-token Discord user-token rotator landed in PR #47. v1 covers the proxy, bi
 - [ ] **Published `@synertry/discord-rotator-types` package.** Cross-codebase consumers currently copy-paste `src/rotator/types.ts`. Publish when there are 2+ active consumers OR the types drift in a way that bites someone.
 - [ ] **Smart Placement.** Disabled in v1. Revisit once we have real RPC latency data on the DO path.
 - [ ] **Reaction-emoji route inclusion in the rotation allowlist.** v1 keeps `PUT|DELETE /channels/:id/messages/:id/reactions/:emoji/@me` on static tokens because they are authorship endpoints. If a read-only reaction-fetch use case shows up (`GET /channels/:id/messages/:id/reactions/:emoji`), add it to `isRotatableRoute`.
-- [ ] **Server-side `tokenSecret` uniqueness check.** `TokenPoolDO.register()` keys by `label` only, so the same token registered under two different labels currently succeeds and wastes rotation (both entries share Discord's per-token-per-bucket budget). A cheap O(N) hash-compare at register-time would close it. Pool cap is 20, so the scan is trivial.
 
 
 ## Client identity hardening (post-feat/client-identity)

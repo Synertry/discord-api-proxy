@@ -14,7 +14,6 @@ import { FALLBACK_PROFILE_ID, listProfileIds } from '../../src/fingerprint/profi
 import { createTokenPoolClient, getPoolStub } from '../../src/rotator/client';
 
 const VALID_TOKEN = 'A'.repeat(40) + '.' + 'B'.repeat(10) + '.' + 'C'.repeat(40);
-const VALID_TOKEN_2 = 'D'.repeat(40) + '.' + 'E'.repeat(10) + '.' + 'F'.repeat(40);
 
 const ADMIN_KEY = 'admin-key-for-tests';
 const PROXY_KEY = 'proxy-key-for-tests';
@@ -34,6 +33,12 @@ function admin() {
 let labelCounter = 0;
 function nextLabel(): string {
   return `tok-${Date.now()}-${labelCounter++}`;
+}
+
+let tokenCounter = 0;
+/** A distinct, format-valid token per call: the pool rejects one secret registered under two labels, and this file shares one DO. */
+function uniqueToken(): string {
+  return `${'A'.repeat(40)}.${'B'.repeat(10)}.${`${Date.now()}${tokenCounter++}`.padStart(40, 'C')}`;
 }
 
 async function adminPost(app: ReturnType<typeof admin>, path: string, body: unknown, key = ADMIN_KEY) {
@@ -90,7 +95,7 @@ describe('admin POST /tokens', () => {
     const res = await adminPost(app, '/admin/tokens', {
       label,
       slot: 'default',
-      tokenSecret: VALID_TOKEN,
+      tokenSecret: uniqueToken(),
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as { label: string; registeredAt: number };
@@ -117,12 +122,12 @@ describe('admin POST /tokens', () => {
   it('returns the same generic 400 for "label exists" and "invalid format" (constant-time)', async () => {
     const app = admin();
     const label = nextLabel();
-    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: VALID_TOKEN });
+    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: uniqueToken() });
 
     const dup = await adminPost(app, '/admin/tokens', {
       label,
       slot: 'default',
-      tokenSecret: VALID_TOKEN_2,
+      tokenSecret: uniqueToken(),
     });
     const bad = await adminPost(app, '/admin/tokens', {
       label: 'has space',
@@ -135,13 +140,25 @@ describe('admin POST /tokens', () => {
     const badBody = (await bad.json()) as { error: string };
     expect(dupBody.error).toBe(badBody.error);
   });
+
+  it('returns the same generic 400 when the secret is already registered under another label', async () => {
+    const app = admin();
+    const secret = uniqueToken();
+    const first = await adminPost(app, '/admin/tokens', { label: nextLabel(), slot: 'default', tokenSecret: secret });
+    const reused = await adminPost(app, '/admin/tokens', { label: nextLabel(), slot: 'premium', tokenSecret: secret });
+    const bad = await adminPost(app, '/admin/tokens', { label: 'has space', slot: 'default', tokenSecret: uniqueToken() });
+    expect(first.status).toBe(201);
+    expect(reused.status).toBe(400);
+    expect(bad.status).toBe(400);
+    expect(await reused.json()).toEqual(await bad.json());
+  });
 });
 
 describe('admin GET /tokens never returns the secret', () => {
   it('omits tokenSecret from list responses', async () => {
     const app = admin();
     const label = nextLabel();
-    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: VALID_TOKEN });
+    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: uniqueToken() });
 
     const res = await adminGet(app, '/admin/tokens');
     expect(res.status).toBe(200);
@@ -156,7 +173,7 @@ describe('admin DELETE /tokens/:label', () => {
   it('returns 204 and removes the token', async () => {
     const app = admin();
     const label = nextLabel();
-    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: VALID_TOKEN });
+    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: uniqueToken() });
     const del = await adminDelete(app, `/admin/tokens/${label}`);
     expect(del.status).toBe(204);
   });
@@ -178,7 +195,7 @@ describe('admin POST /tokens/:label/reset', () => {
   it('returns 200 on existing label', async () => {
     const app = admin();
     const label = nextLabel();
-    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: VALID_TOKEN });
+    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: uniqueToken() });
     const res = await adminPost(app, `/admin/tokens/${label}/reset`, {});
     expect(res.status).toBe(200);
   });
@@ -203,7 +220,7 @@ describe('admin fingerprint endpoints', () => {
   it('POST /admin/tokens/:label/fingerprint validates profileId and returns 400 on unknown', async () => {
     const app = admin();
     const label = nextLabel();
-    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: VALID_TOKEN });
+    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: uniqueToken() });
     const bad = await adminPost(app, `/admin/tokens/${label}/fingerprint`, { profileId: 'nonsense' });
     expect(bad.status).toBe(400);
   });
@@ -211,7 +228,7 @@ describe('admin fingerprint endpoints', () => {
   it('POST /admin/tokens/:label/fingerprint sets the assignment', async () => {
     const app = admin();
     const label = nextLabel();
-    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: VALID_TOKEN });
+    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: uniqueToken() });
     const ok = await adminPost(app, `/admin/tokens/${label}/fingerprint`, {
       profileId: 'chrome-win-de',
     });
@@ -332,12 +349,12 @@ describe('admin GET /health', () => {
     await adminPost(app, '/admin/tokens', {
       label: nextLabel(),
       slot: 'default',
-      tokenSecret: VALID_TOKEN,
+      tokenSecret: uniqueToken(),
     });
     await adminPost(app, '/admin/tokens', {
       label: nextLabel(),
       slot: 'premium',
-      tokenSecret: VALID_TOKEN_2,
+      tokenSecret: uniqueToken(),
     });
     const res = await adminGet(app, '/admin/health');
     expect(res.status).toBe(200);
@@ -394,7 +411,7 @@ describe('admin GET /admin/identity', () => {
   it('previews a registered pool token by label', async () => {
     const app = admin();
     const label = nextLabel();
-    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: VALID_TOKEN });
+    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: uniqueToken() });
     const res = await adminGet(app, `/admin/identity?label=${label}`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { identityKey: string; headers: Record<string, string> };
@@ -409,7 +426,7 @@ describe('admin GET /admin/identity', () => {
     // making an equality assertion pass even for a preview that always
     // returns the fallback.
     const label = 'preview-token';
-    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: VALID_TOKEN });
+    await adminPost(app, '/admin/tokens', { label, slot: 'default', tokenSecret: uniqueToken() });
 
     const expectedProfileId = pickProfileId(label, listProfileIds());
     expect(expectedProfileId).not.toBe(FALLBACK_PROFILE_ID);
