@@ -8,10 +8,9 @@
 
 /**
  * @module custom/shared/paged-messages
- * Shared cursor-paginated Discord message fetcher for the in-worker custom
- * routes (kindness-cascade, hear-me-out) that read an entire channel's
- * history. Replaces each route's own near-identical pager with one
- * implementation that additionally:
+ * Shared cursor-paginated Discord message fetcher for custom routes that
+ * read an entire channel's history. One implementation, so every such route
+ * gets the same:
  *
  * - Leases the identity's static guard immediately before each page's fetch
  *   and settles it immediately after (same lease-at-point-of-use discipline

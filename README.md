@@ -7,7 +7,7 @@
 [![Hono](https://img.shields.io/badge/Hono-E36002?logo=hono&logoColor=white)](https://hono.dev/)
 [![License: BSL-1.0](https://img.shields.io/badge/License-BSL--1.0-blue.svg)](https://www.boost.org/LICENSE_1_0.txt)
 
-A reverse proxy for the Discord API, deployed as a [Cloudflare Worker](https://developers.cloudflare.com/workers/). Adds authentication, token management, snowflake validation, and server-specific business logic endpoints on top of the standard Discord API.
+A reverse proxy for the Discord API, deployed as a [Cloudflare Worker](https://developers.cloudflare.com/workers/). Adds authentication, token management, snowflake validation, and a skeleton for server-side business logic endpoints on top of the standard Discord API.
 Original motivation was for my Google Sheets to be able to call the Discord API, without my requests being rejected from Discord, because they would detect Google's IP addresses.
 
 ## Features
@@ -20,7 +20,7 @@ Original motivation was for my Google Sheets to be able to call the Discord API,
 - **Public healthcheck** - Unauthenticated `GET /healthcheck` returning service status, build hash, and UTC timestamps. Mounted before the sieve so phone browsers, status pages, and uptime monitors can hit it without a key.
 - **Snowflake validation** - Validates Discord IDs in URL paths before forwarding, returning Discord-compatible error responses
 - **Rate limit interception** - Reformats 429 responses into a consistent JSON envelope, preserving `X-Proxy-*` guard signals
-- **Custom endpoints** - Server-specific business logic that processes Discord data server-side, sharing the same paced pager and header composer as the proxy
+- **Custom endpoint skeleton** - A `/custom/*` router plus the shared paced pager and header composer, ready for server-side business logic that processes Discord data. No endpoint ships by default
 - **OpenAPI spec** - Auto-generated via `@hono/zod-openapi` with Swagger UI (admin and healthcheck sub-apps are intentionally not exported to the public doc)
 
 ## Tech Stack
@@ -131,7 +131,7 @@ Request
 ```
 
 > [!NOTE]
-> Custom endpoints under `/custom/*` come first; anything unmatched falls through to the proxy forwarder.
+> Custom endpoints under `/custom/*` come first; an unmatched `/custom/*` path answers `404` and is never forwarded. Everything outside `/custom` falls through to the proxy forwarder.
 
 ### Token Selection
 
@@ -225,9 +225,6 @@ src/
   custom/
     shared/
       paged-messages.ts        Shared paced pager: cursor pagination + guard lease-at-point-of-use + 429 retry
-    chillzone/events/
-      bingo/                  Bingo participant counts (own pool client with acquire-backoff + live-429 retry)
-      kindness-cascade/       Kindness Cascade tallying module (see its own README)
 
 test/
   env.d.ts                    Cloudflare test type augmentation
@@ -235,35 +232,23 @@ test/
   routes/                     Integration tests for proxy, custom, admin, healthcheck
   rotator/                    DO + pure-function tests via @cloudflare/vitest-plugin
   fingerprint/                Header composer, profile registry, session, versions tests
-  custom/                     Shared pager + per-event classifier/tallier/formatter/handler tests
+  custom/                     Shared pager tests
   scheduled/                  Client-versions refresh (independent persistence of both records)
 ```
 
 ## Custom Endpoints
 
-### Kindness Cascade
+`/custom/*` is reserved for server-side endpoints that process Discord data instead of forwarding a single call (event tallies, analytics, aggregations). The tree ships as a skeleton:
 
-Tallies submissions for the ChillZone server's Kindness Cascade event. Fetches all messages from a channel, classifies each one, and returns ranked leaderboards.
+- `src/routes/custom.ts` - the `/custom` router. Mount a feature module with `customRoutes.route('/<scope>/<feature>', featureRoutes)` above the trailing handler; any unmatched `/custom/*` path answers `404 { "error": "Not Found" }` and never reaches Discord.
+- `src/custom/shared/paged-messages.ts` - `fetchAllMessages`, the paced, guard-leased cursor pager for reading a whole channel history (1 s minimum gap between calls, `Retry-After` honored, identity blocks reported as `IdentityBlockedError`). Build on it rather than writing a fetch loop.
 
-```
-GET /custom/chillzone/events/kindness-cascade?guildId={id}&channelId={id}
-GET /custom/chillzone/events/kindness-cascade?guildId={id}&channelId={id}&formattedMessage=true
-```
-
-See [`src/custom/chillzone/events/kindness-cascade/README.md`](src/custom/chillzone/events/kindness-cascade/README.md) for full documentation.
-
-### Cupid's Inbox
-
-```
-GET /custom/chillzone/events/cupids-inbox
-```
-
-Returns `{ "tally": 0 }`. Placeholder for now. Not yet imported from my private project.
+A feature module lives at `src/custom/<scope>/<feature>/` with `handler.ts` (an `OpenAPIHono` sub-app built from `createRoute` definitions), `schemas.ts` (Zod), and pure `classifier`/`tallier`/`formatter` files as needed, each with a spec under `test/custom/<scope>/<feature>/`. Handlers build headers with `composeRequestHeaders`, lease the static guard (`c.var.staticGuard`) or acquire a pool token immediately before each fetch, and settle immediately after with the result of `inspectResponse`.
 
 ## Testing
 
 ```bash
-bun run test           # Run all 688 tests across 43 suites
+bun run test           # Run all 516 tests across 29 suites
 bun run test -- --ui   # Open Vitest UI
 ```
 
