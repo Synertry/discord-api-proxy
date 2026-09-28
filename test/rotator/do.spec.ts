@@ -21,6 +21,7 @@ import type { ReleaseInput, StaticIdentityState, TokenState } from '../../src/ro
 
 const VALID_TOKEN = 'A'.repeat(40) + '.' + 'B'.repeat(10) + '.' + 'C'.repeat(40);
 const VALID_TOKEN_2 = 'D'.repeat(40) + '.' + 'E'.repeat(10) + '.' + 'F'.repeat(40);
+const VALID_TOKEN_3 = 'G'.repeat(40) + '.' + 'H'.repeat(10) + '.' + 'I'.repeat(40);
 const ROUTE = 'GET:/guilds/:id/messages/search';
 const GUILD_ID = '219564597349318656';
 
@@ -87,11 +88,33 @@ describe('TokenPoolDO.register / list / countSlot', () => {
     if (!second.ok) expect(second.reason).toBe('label-exists');
   });
 
+  it('rejects a token secret already registered under another label, in either slot', async () => {
+    const stub = freshStub();
+    await stub.register({ label: 'label-a', slot: 'default', tokenSecret: VALID_TOKEN });
+    const sameSlot = await stub.register({ label: 'label-b', slot: 'default', tokenSecret: VALID_TOKEN });
+    const otherSlot = await stub.register({ label: 'label-b', slot: 'premium', tokenSecret: VALID_TOKEN });
+    expect(sameSlot).toEqual({ ok: false, reason: 'token-exists' });
+    expect(otherSlot).toEqual({ ok: false, reason: 'token-exists' });
+    expect(await stub.countSlot('default')).toBe(1);
+    expect(await stub.countSlot('premium')).toBe(0);
+
+    const distinct = await stub.register({ label: 'label-b', slot: 'premium', tokenSecret: VALID_TOKEN_2 });
+    expect(distinct.ok).toBe(true);
+  });
+
+  it('accepts the secret under a new label once its previous label is unregistered', async () => {
+    const stub = freshStub();
+    await stub.register({ label: 'old-name', slot: 'default', tokenSecret: VALID_TOKEN });
+    await stub.unregister('old-name');
+    const relabeled = await stub.register({ label: 'new-name', slot: 'default', tokenSecret: VALID_TOKEN });
+    expect(relabeled.ok).toBe(true);
+  });
+
   it('countSlot is per-slot', async () => {
     const stub = freshStub();
     await stub.register({ label: 'd1', slot: 'default', tokenSecret: VALID_TOKEN });
     await stub.register({ label: 'd2', slot: 'default', tokenSecret: VALID_TOKEN_2 });
-    await stub.register({ label: 'p1', slot: 'premium', tokenSecret: VALID_TOKEN });
+    await stub.register({ label: 'p1', slot: 'premium', tokenSecret: VALID_TOKEN_3 });
     expect(await stub.countSlot('default')).toBe(2);
     expect(await stub.countSlot('premium')).toBe(1);
   });
@@ -941,7 +964,7 @@ describe('TokenPoolDO.reset and health', () => {
     const stub = freshStub();
     await stub.register({ label: 'a', slot: 'default', tokenSecret: VALID_TOKEN });
     await stub.register({ label: 'b', slot: 'default', tokenSecret: VALID_TOKEN_2 });
-    await stub.register({ label: 'p', slot: 'premium', tokenSecret: VALID_TOKEN });
+    await stub.register({ label: 'p', slot: 'premium', tokenSecret: VALID_TOKEN_3 });
 
     // Force `b` to invalid via real acquire-then-release cycles (a fabricated
     // requestId is correctly rejected now that release() is lease-gated -

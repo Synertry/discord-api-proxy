@@ -30,6 +30,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { applyOutcome, evaluateBudget, grantLease, openUpstreamCircuit, pruneLeases } from './budget';
 import { chooseToken, evaluateTokenEligibility } from './selection';
 import { pruneIneligibleGuilds } from './validators';
+import { hashToken } from './token-hash';
 import { lookupProfile, listProfileIds } from '../fingerprint/profiles';
 import { BUILD_NUMBER_META_KEY, CHROME_VERSION_META_KEY } from '../fingerprint/versions';
 import { fnv1a32 } from '../fingerprint/hash';
@@ -498,16 +499,26 @@ export class TokenPoolDO extends DurableObject<Bindings> {
   }
 
   /** Register a new token. Caller must enforce pool cap before calling. */
-  async register(input: RegisterInput): Promise<{ ok: true; label: string; registeredAt: number } | { ok: false; reason: 'label-exists' }> {
+  async register(input: RegisterInput): Promise<{ ok: true; label: string; registeredAt: number } | { ok: false; reason: 'label-exists' | 'token-exists' }> {
     return this.#serialize(() => this.#register(input));
   }
 
-  async #register(input: RegisterInput): Promise<{ ok: true; label: string; registeredAt: number } | { ok: false; reason: 'label-exists' }> {
+  async #register(input: RegisterInput): Promise<{ ok: true; label: string; registeredAt: number } | { ok: false; reason: 'label-exists' | 'token-exists' }> {
     const now = Date.now();
     const key = `${TOKEN_KEY_PREFIX}${input.label}`;
     const existing = await this.ctx.storage.get<TokenState>(key);
     if (existing) {
       return { ok: false, reason: 'label-exists' };
+    }
+    // One physical token under two labels would share Discord's per-token budget
+    // while looking like extra capacity. Compare digests across every slot; the
+    // pool cap keeps this to at most 40 SHA-256s, and digest equality tells an
+    // admin-authenticated caller nothing about any other secret.
+    const candidateHash = await hashToken(input.tokenSecret);
+    for (const registered of await this.loadAllTokens()) {
+      if ((await hashToken(registered.tokenSecret)) === candidateHash) {
+        return { ok: false, reason: 'token-exists' };
+      }
     }
     const t = makeTokenState(input, now);
     await this.ctx.storage.put(key, t);

@@ -198,7 +198,7 @@ export function buildAdminRoutes(): OpenAPIHono<{ Bindings: Bindings }> {
 
     const result = await stub.register(input);
     if (!result.ok) {
-      // Constant-time error shape: same generic message as format/cap errors
+      // Constant-time error shape: label-exists and token-exists collapse into the same generic message as format/cap errors
       return c.json({ error: 'invalid request' }, 400);
     }
     return c.json({ label: result.label, registeredAt: result.registeredAt }, 201);
