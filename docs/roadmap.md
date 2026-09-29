@@ -36,5 +36,5 @@ Realistic per-identity fingerprinting, header allowlisting, and an identity guar
 ## Process
 
 - One bullet per item, terse. Move to the bottom or remove once shipped.
-- Link to the deciding plan / PR / learned skill where useful, so future-you remembers *why* a thing was deferred.
+- Link to the deciding issue or PR where useful, so the reason a thing was deferred stays findable.
 - Architectural decisions and *learnings* (the why-not-shipped reasoning) live in the maintainer's private notes, not here. This roadmap is for *commitments*.
