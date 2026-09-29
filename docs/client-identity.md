@@ -21,7 +21,7 @@ Every user-token request, whether served by a pool token or the guarded static t
 Static tokens are protected by the same per-bucket budget tracking the pool uses, plus abuse-signal circuits that are independent of ordinary bucket cooldowns:
 
 - A captcha challenge in a response body opens a **30-minute** circuit on that identity.
-- A Cloudflare edge block opens a **10-minute** circuit on every identity at once, because they share one egress IP.
+- A Cloudflare edge block opens a circuit on every identity at once, because they share one egress IP. It lasts for the edge response's `Retry-After`, or **10 minutes** when none is sent.
 - A blocked request never reaches Discord; it gets a `429` with `X-Proxy-Block: bucket|capacity|captcha|cloudflare` instead (see [Configuration](configuration.md#responses-the-proxy-adds)).
 - The guard leases atomically immediately before each dispatch and settles immediately after, so concurrent requests on the same identity never oversubscribe its budget. Lease validation happens before any state change, so a forged lease id cannot touch another lease's budget or circuit.
 
@@ -40,6 +40,6 @@ When no `TOKEN_POOL` binding is available, static tokens degrade to unguarded di
 
 - **TLS JA3/JA4 fingerprinting, HTTP/2 frame ordering.** Not emulable from a Cloudflare Worker; the runtime owns the transport.
 - **Egress IP.** Requests originate from Cloudflare's IP ranges regardless of fingerprint realism.
-- **`CF-Worker` / `CF-Connecting-IP` on cross-zone subrequests.** Cloudflare platform behavior; request code cannot remove them.
+- **`CF-Worker` / `CF-Connecting-IP` on cross-zone subrequests.** Cloudflare adds `CF-Worker: <zone>` and sets `CF-Connecting-IP` to the Worker's own client IP; request code cannot remove either.
 
 The full list, with rationale, is in the [roadmap](roadmap.md#accepted-gaps-not-emulable-from-a-cloudflare-worker-or-deliberately-out-of-scope).

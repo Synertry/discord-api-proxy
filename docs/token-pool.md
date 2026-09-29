@@ -28,14 +28,14 @@ The header is stripped before forwarding. Use it to debug one misbehaving token,
 
 ## Admin API
 
-`/admin/*` is gated by `AUTH_KEY_ADMIN` (sent as `x-auth-key` or `Authorization: Bearer`), fails closed with `503` when that secret is unset, and is not part of the public request pipeline. No response ever includes a token secret. Validation failures answer a deliberately generic `400 { "error": "invalid request" }`, so labels and tokens cannot be enumerated.
+`/admin/*` is gated by `AUTH_KEY_ADMIN` (sent as `x-auth-key` or `Authorization: Bearer`), fails closed with `503` when that secret is unset, and is not part of the public request pipeline. No response ever includes a token secret. Token-registry validation failures (`/admin/tokens` and its sub-routes) answer a deliberately generic `400 { "error": "invalid request" }`, so labels and tokens cannot be enumerated; `/admin/static-fingerprint` and `/admin/identity` return more specific 400 messages.
 
 | Endpoint | Purpose |
 |---|---|
 | `POST /admin/tokens` | Register a token: `{ "label", "slot": "default" \| "premium", "tokenSecret", "guildIds"? }`. Labels are 1-64 chars of `A-Z a-z 0-9 . _ -`; at most 20 tokens per slot; a token already in the pool is rejected. `201 { "label", "registeredAt" }`. |
 | `GET /admin/tokens` | List registered tokens with label, slot, and status (no secrets). |
 | `DELETE /admin/tokens/:label` | Unregister (idempotent). `204`. |
-| `POST /admin/tokens/:label/reset` | Clear a token's invalid status and consecutive-401 count. |
+| `POST /admin/tokens/:label/reset` | Reactivate a token: clears its invalid status and consecutive-401 count, and also its global cooldown, any open captcha circuit, and its ineligible-guild list. Only use it once the cause of a hold is gone. |
 | `POST /admin/tokens/:label/fingerprint` | Pin the token's fingerprint profile: `{ "profileId" }`. |
 | `GET /admin/health` | Per-slot pool rollup. |
 | `GET /admin/fingerprint/profiles` | Known profile ids and the fallback id. |
