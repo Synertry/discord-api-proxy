@@ -21,7 +21,7 @@ Every user-token request, whether served by a pool token or the guarded static t
 Static tokens are protected by the same per-bucket budget tracking the pool uses, plus abuse-signal circuits that are independent of ordinary bucket cooldowns:
 
 - A captcha challenge in a response body opens a **30-minute** circuit on that identity.
-- A Cloudflare edge block opens a circuit on every identity at once, because they share one egress IP. It lasts for the edge response's `Retry-After`, or **10 minutes** when none is sent.
+- A Cloudflare edge block opens a circuit on every identity at once, because they share one egress IP. It lasts for the edge response's `Retry-After` when that is a number of seconds, otherwise (absent or an HTTP date) for **10 minutes**.
 - A blocked request never reaches Discord; it gets a `429` with `X-Proxy-Block: bucket|capacity|captcha|cloudflare` instead (see [Configuration](configuration.md#responses-the-proxy-adds)).
 - The guard leases atomically immediately before each dispatch and settles immediately after, so concurrent requests on the same identity never oversubscribe its budget. Lease validation happens before any state change, so a forged lease id cannot touch another lease's budget or circuit.
 

@@ -34,7 +34,7 @@ All key comparisons are constant-time.
 | `x-auth-key` or `Authorization` | `AUTH_KEY` or `AUTH_KEY_PREMIUM` (`Authorization` accepts an optional `Bearer ` prefix) | Required on every proxied request; the matched key selects the `default` or `premium` slot. Missing or wrong key: `401 { "error": "Unauthorized" }`. `Authorization` is always replaced before forwarding, never appended. |
 | `X-Proxy-Context` | `user`, `bot` | Forces the user or bot token. Without it, paths containing `/guilds` use the user token and everything else uses the bot token. |
 | `X-Proxy-Token` | `auto` (default), `static`, `<label>` | On pool-eligible user-token routes: rotate across registered pool tokens, force the guarded static token, or pin one registered token. See [Token pool](token-pool.md). |
-| `X-Proxy-Typing` | `on` | On a user-token `POST /channels/:id/messages` with a JSON body under 64 KiB that has `content`: send a typing indicator first, then wait a humanized delay before the message. Ignored for bot-context sends and for bodies it does not read. See below. |
+| `X-Proxy-Typing` | `on` | On a user-token `POST /channels/:id/messages` with a JSON body under 64 KiB whose `content` is a non-empty string: send a typing indicator first, then wait a humanized delay before the message. Ignored otherwise (bot-context sends, empty or missing `content`, bodies it does not read). See below. |
 | `X-Proxy-Typing-Max-Ms` | integer `1000`-`30000` | Raises the typing delay cap for long messages. Only checked when the typing path above is active; then an out-of-range value answers `400 { "error": "invalid X-Proxy-Typing-Max-Ms: expected an integer between 1000 and 30000" }` before anything is sent. |
 
 All `X-Proxy-*` request headers are stripped before the request reaches Discord, and only an allowlist of inbound headers is forwarded at all (see [Client identity](client-identity.md)).
@@ -50,7 +50,7 @@ With `X-Proxy-Typing: on` the proxy dispatches `POST /channels/:id/typing`, then
 | `429 { "error": "Too Many Requests", "retryAfter": <seconds or null> }` | Every 429 is rewritten into this envelope. `Retry-After`, `X-RateLimit-*`, and `X-Proxy-*` headers from the original response are preserved. |
 | `X-Proxy-Block: bucket` / `capacity` | The guard held the request because that identity's budget for the Discord bucket is spent or fully leased. Ordinary; retry after `retryAfter`. |
 | `X-Proxy-Block: captcha` | A captcha challenge was seen for this identity: its circuit is open for 30 minutes. Do not retry sooner and do not switch tokens to route around it. |
-| `X-Proxy-Block: cloudflare` | A Cloudflare edge block was seen: every identity is held (they share one egress IP) for the edge response's `Retry-After`, or 10 minutes when it sends none. |
+| `X-Proxy-Block: cloudflare` | A Cloudflare edge block was seen: every identity is held (they share one egress IP) for the edge response's `Retry-After` when it is a number of seconds, otherwise (absent or an HTTP date) for 10 minutes. |
 | `400` with Discord's `Invalid Form Body` shape | A path segment that must be a Discord id (after `guilds`, `channels`, `users`, `messages`, ...) is not a 17-20 digit snowflake. Rejected before any Durable Object or Discord call. |
 | `404 { "error": "Not Found" }` | Unmatched `/custom/*` path; never forwarded. |
 

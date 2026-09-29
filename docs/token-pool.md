@@ -28,7 +28,7 @@ The header is stripped before forwarding. Use it to debug one misbehaving token,
 
 ## Admin API
 
-`/admin/*` is gated by `AUTH_KEY_ADMIN` (sent as `x-auth-key` or `Authorization: Bearer`), fails closed with `503` when that secret is unset, and is not part of the public request pipeline. No response ever includes a token secret. Token-registry validation failures (`/admin/tokens` and its sub-routes) answer a deliberately generic `400 { "error": "invalid request" }`, so labels and tokens cannot be enumerated; `/admin/static-fingerprint` and `/admin/identity` return more specific 400 messages.
+`/admin/*` is gated by `AUTH_KEY_ADMIN` (sent as `x-auth-key` or `Authorization: Bearer`), fails closed with `503` when that secret is unset, and is not part of the public request pipeline. No response ever includes a token secret. Token-registry validation failures (`/admin/tokens` and its sub-routes) answer a deliberately generic `400 { "error": "invalid request" }`, so labels and tokens cannot be enumerated. `/admin/static-fingerprint` and `/admin/identity` mostly do the same but return a more specific message for some mistakes (both or neither of `profileId`/`custom`, an invalid custom profile, a wrong `kind`/`label` combination).
 
 | Endpoint | Purpose |
 |---|---|
