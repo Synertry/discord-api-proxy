@@ -1,15 +1,15 @@
 # Discord API Proxy
 
-[![CI](https://github.com/Synertry/discord-api-proxy/actions/workflows/ci.yaml/badge.svg)](https://github.com/Synertry/discord-api-proxy/actions/workflows/ci.yaml)
-[![Deploy](https://github.com/Synertry/discord-api-proxy/actions/workflows/deploy.yaml/badge.svg)](https://github.com/Synertry/discord-api-proxy/actions/workflows/deploy.yaml)
+[![CI](https://img.shields.io/github/actions/workflow/status/Synertry/discord-api-proxy/ci.yaml?branch=main&label=CI&logo=github)](https://github.com/Synertry/discord-api-proxy/actions/workflows/ci.yaml)
+[![Deploy](https://img.shields.io/github/actions/workflow/status/Synertry/discord-api-proxy/deploy.yaml?branch=production&label=deploy&logo=cloudflareworkers&logoColor=white)](https://github.com/Synertry/discord-api-proxy/actions/workflows/deploy.yaml)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare%20Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
-[![Hono](https://img.shields.io/badge/Hono-E36002?logo=hono&logoColor=white)](https://hono.dev/)
-[![License: BSL-1.0](https://img.shields.io/badge/License-BSL--1.0-blue.svg)](https://www.boost.org/LICENSE_1_0.txt)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflareworkers&logoColor=white)](https://workers.cloudflare.com/)
+[![Hono](https://img.shields.io/badge/Hono-4.x-E36002?logo=hono&logoColor=white)](https://hono.dev/)
+[![Bun](https://img.shields.io/badge/Bun-1.x-000000?logo=bun&logoColor=white)](https://bun.sh/)
+[![License: BSL-1.0](https://img.shields.io/badge/license-BSL--1.0-blue.svg)](./LICENSE)
 
-A reverse proxy for the Discord API, deployed as a [Cloudflare Worker](https://developers.cloudflare.com/workers/) and written in strict TypeScript with [Hono](https://hono.dev). It adds authentication, token management, a realistic client identity for user tokens, snowflake validation, and a skeleton for server-side endpoints on top of the standard Discord API.
-
-My original motivation was letting my Google Sheets call the Discord API without Discord rejecting the requests for coming from Google's IP addresses.
+A reverse proxy for the Discord API, deployed as a [Cloudflare Worker](https://developers.cloudflare.com/workers/). Adds authentication, token management, snowflake validation, and a skeleton for server-side business logic endpoints on top of the standard Discord API.
+Original motivation was for my Google Sheets to be able to call the Discord API, without my requests being rejected from Discord, because they would detect Google's IP addresses.
 
 ## Features
 
@@ -49,7 +49,7 @@ curl -H "x-auth-key: your-api-key" -H "X-Proxy-Context: user" http://127.0.0.1:8
 ```
 
 > [!CAUTION]
-> I advise using an alt account for the user token to avoid any risk of Discord banning your main account.
+> I advise to use an alt account for the user token to avoid any future risks for your main account of being banned by Discord.
 
 ## How requests flow
 
