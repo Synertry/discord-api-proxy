@@ -34,8 +34,8 @@
 		"yaml": "^2.9.1"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-plugin": "^1.2.7",
-		"@types/node": "^26.6.2",
+		"@cloudflare/vitest-plugin": "^1.2.8",
+		"@types/node": "^26.6.3",
 		"typescript": "^7.0.2",
 		"vitest": "^4.1.11",
 		"wrangler": "^4.137.0"
