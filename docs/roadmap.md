@@ -1,4 +1,4 @@
-# ROADMAP
+# Roadmap
 
 Open work, deliberately deferred decisions, and follow-up items that didn't make a release. Pruned as things ship.
 
@@ -19,7 +19,7 @@ Multi-token Discord user-token rotator landed in PR #47. v1 covers the proxy, th
 
 ## Client identity hardening (post-feat/client-identity)
 
-Realistic per-identity fingerprinting, header allowlisting, and an identity guard for static user tokens landed to close the gap where static `DISCORD_TOKEN_USER`/`_PREMIUM` requests bypassed the pool's rate-limit and abuse-signal protections entirely. See README's Client Identity section for the shipped design.
+Realistic per-identity fingerprinting, header allowlisting, and an identity guard for static user tokens landed to close the gap where static `DISCORD_TOKEN_USER`/`_PREMIUM` requests bypassed the pool's rate-limit and abuse-signal protections entirely. See [Client identity](client-identity.md) for the shipped design.
 
 ### Accepted gaps (not emulable from a Cloudflare Worker, or deliberately out of scope)
 
@@ -36,5 +36,5 @@ Realistic per-identity fingerprinting, header allowlisting, and an identity guar
 ## Process
 
 - One bullet per item, terse. Move to the bottom or remove once shipped.
-- Link to the deciding plan / PR / learned skill where useful, so future-you remembers *why* a thing was deferred.
-- Architectural decisions and *learnings* (the why-not-shipped reasoning) live in the maintainer's private notes, not here. ROADMAP is for *commitments*.
+- Link to the deciding issue or PR where useful, so the reason a thing was deferred stays findable.
+- Architectural decisions and *learnings* (the why-not-shipped reasoning) live in the maintainer's private notes, not here. This roadmap is for *commitments*.
