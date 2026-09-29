@@ -24,7 +24,7 @@ bun run cf-typegen         # regenerate worker-configuration.d.ts
 bun wrangler dev           # local dev server on http://127.0.0.1:8787
 ```
 
-`wrangler dev` reads runtime secrets from a gitignored `.dev.vars` file at the repo root. At minimum it needs a bot token, a user token, and an API key; see the README's Setup section for the full optional set (`DISCORD_TOKEN_USER_PREMIUM`, `AUTH_KEY_PREMIUM`, `AUTH_KEY_ADMIN`).
+`wrangler dev` reads runtime secrets from a gitignored `.dev.vars` file at the repo root. At minimum it needs a bot token, a user token, and an API key; see [docs/configuration.md](../docs/configuration.md) for the full optional set (`DISCORD_TOKEN_USER_PREMIUM`, `AUTH_KEY_PREMIUM`, `AUTH_KEY_ADMIN`).
 
 ```env
 DISCORD_TOKEN_BOT=your-bot-token
