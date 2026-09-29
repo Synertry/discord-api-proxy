@@ -15,4 +15,7 @@ export default defineConfig({
 			wrangler: { configPath: './wrangler.jsonc' },
 		}),
 	],
+	test: {
+		include: ['test/**/*.spec.ts', '.github/scripts/**/*.spec.ts'],
+	},
 });
