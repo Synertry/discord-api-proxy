@@ -25,7 +25,7 @@
  */
 
 import { evaluateBudget } from './budget';
-import type { AcquireUnavailable, IdentityCircuit, RouteKey, Slot, TokenState } from './types';
+import type { AbuseSignal, AcquireUnavailable, IdentityCircuit, RouteKey, Slot, TokenState } from './types';
 
 export interface SelectionResult {
   chosen: TokenState | null;
@@ -40,7 +40,7 @@ export interface SelectionResult {
  * (wrong slot, status != active, or guild-whitelist mismatch).
  */
 export type EligibilityResult =
-  { ok: true } | { ok: false; reason: 'no-eligible-token' } | { ok: false; reason: 'cooldown'; retryAfter: number };
+  { ok: true } | { ok: false; reason: 'no-eligible-token' } | { ok: false; reason: 'cooldown'; retryAfter: number; signal?: AbuseSignal };
 
 /**
  * Evaluate whether a single token can satisfy `(slot, routeKey, guildId)` at
@@ -66,7 +66,7 @@ export function evaluateTokenEligibility(
   const budget = evaluateBudget(t, routeKey, now, upstreamCircuit);
   // An open circuit is a hard gate for its full duration (see `evaluateBudget`);
   // never let a sooner guild-ineligibility expiry understate it.
-  if (!budget.ok && budget.signal) return { ok: false, reason: 'cooldown', retryAfter: budget.retryAfter };
+  if (!budget.ok && budget.signal) return { ok: false, reason: 'cooldown', retryAfter: budget.retryAfter, signal: budget.signal };
 
   const candidates: number[] = [];
   if (!budget.ok) candidates.push(now + budget.retryAfter);
@@ -116,17 +116,17 @@ export function chooseToken(
     // otherwise the slot is structurally blocked (all invalid / whitelist-mismatch).
     const cooldowns = evaluations
       .map(({ e }) => e)
-      .filter((e): e is { ok: false; reason: 'cooldown'; retryAfter: number } => !e.ok && e.reason === 'cooldown');
+      .filter((e): e is Extract<EligibilityResult, { reason: 'cooldown' }> => !e.ok && e.reason === 'cooldown');
     if (cooldowns.length === 0) {
       return {
         chosen: null,
         unavailable: { ok: false, reason: 'no-eligible-token', retryAfter: 60_000 },
       };
     }
-    const retryAfter = Math.min(...cooldowns.map((c) => c.retryAfter));
+    const cooldown = cooldowns.reduce((soonest, candidate) => (candidate.retryAfter < soonest.retryAfter ? candidate : soonest));
     return {
       chosen: null,
-      unavailable: { ok: false, reason: 'cooldown', retryAfter },
+      unavailable: cooldown,
     };
   }
 

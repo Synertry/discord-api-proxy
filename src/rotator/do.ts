@@ -29,6 +29,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { applyOutcome, evaluateBudget, grantLease, openUpstreamCircuit, pruneLeases } from './budget';
 import { chooseToken, evaluateTokenEligibility } from './selection';
+import { isReleaseInput } from './release-input';
 import { pruneIneligibleGuilds } from './validators';
 import { hashToken } from './token-hash';
 import { lookupProfile, listProfileIds } from '../fingerprint/profiles';
@@ -274,7 +275,7 @@ export class TokenPoolDO extends DurableObject<Bindings> {
     const verdict = evaluateTokenEligibility(hydrated, slot, routeKey, now, guildId, upstreamCircuit);
     if (!verdict.ok) {
       if (verdict.reason === 'cooldown') {
-        return { ok: false, reason: 'cooldown', retryAfter: verdict.retryAfter };
+        return verdict;
       }
       return { ok: false, reason: 'no-eligible-token', retryAfter: 60_000 };
     }
@@ -374,6 +375,20 @@ export class TokenPoolDO extends DurableObject<Bindings> {
     }
 
     await Promise.all([this.ctx.storage.put(`${TOKEN_KEY_PREFIX}${label}`, t), this.applyUpstreamCircuit(outcome, now)]);
+  }
+
+  /** Read the shared edge circuit without creating or pruning any identity state. */
+  async checkUpstreamCircuit(): Promise<IdentityBlock | null> {
+    const now = Date.now();
+    const circuit = await this.getUpstreamCircuit();
+    if (!circuit || circuit.signal !== 'cloudflare' || circuit.until <= now) return null;
+    return { reason: 'cooldown', retryAfter: circuit.until - now, signal: 'cloudflare' };
+  }
+
+  /** Trusted bot callers report edge blocks without granting a token or identity lease. */
+  async reportUpstreamOutcome(outcome: ReleaseInput): Promise<void> {
+    if (!isReleaseInput(outcome) || outcome.signal !== 'cloudflare') return;
+    return this.#serialize(() => this.applyUpstreamCircuit(outcome, Date.now()));
   }
 
   /**
@@ -502,11 +517,15 @@ export class TokenPoolDO extends DurableObject<Bindings> {
   }
 
   /** Register a new token. Caller must enforce pool cap before calling. */
-  async register(input: RegisterInput): Promise<{ ok: true; label: string; registeredAt: number } | { ok: false; reason: 'label-exists' | 'token-exists' }> {
+  async register(
+    input: RegisterInput,
+  ): Promise<{ ok: true; label: string; registeredAt: number } | { ok: false; reason: 'label-exists' | 'token-exists' }> {
     return this.#serialize(() => this.#register(input));
   }
 
-  async #register(input: RegisterInput): Promise<{ ok: true; label: string; registeredAt: number } | { ok: false; reason: 'label-exists' | 'token-exists' }> {
+  async #register(
+    input: RegisterInput,
+  ): Promise<{ ok: true; label: string; registeredAt: number } | { ok: false; reason: 'label-exists' | 'token-exists' }> {
     const now = Date.now();
     const key = `${TOKEN_KEY_PREFIX}${input.label}`;
     const existing = await this.ctx.storage.get<TokenState>(key);
