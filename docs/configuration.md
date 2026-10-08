@@ -13,9 +13,17 @@ Locally these live in a gitignored `.dev.vars` at the repo root (see [`.dev.vars
 | `AUTH_KEY` | yes | Shared secret callers send to use the proxy. If unset, every proxied request answers `503 { "error": "Service misconfigured" }`. |
 | `DISCORD_TOKEN_USER_PREMIUM` | no | Second user token (e.g. an account with access to gated channels), used for user-context requests authenticated with `AUTH_KEY_PREMIUM` (the `premium` slot). |
 | `AUTH_KEY_PREMIUM` | no | Second caller key that selects the `premium` slot. Set it together with `DISCORD_TOKEN_USER_PREMIUM`: a user-context request with `AUTH_KEY_PREMIUM` while the premium token is unset answers `503` instead of silently falling back to the default token. Bot-context requests always use `DISCORD_TOKEN_BOT`, whichever key matched. |
-| `AUTH_KEY_ADMIN` | no | Key for the `/admin/*` sub-app. Independent of the proxy keys: it grants no proxy access, and the proxy keys grant no admin access. When unset, `/admin/*` fails closed with `503`. |
+| `AUTH_KEY_ADMIN` | no | Key for the `/admin/*` sub-app. With distinct keys, it grants no proxy access, and proxy keys grant no admin access. When unset, `/admin/*` fails closed with `503`. |
 
 All key comparisons are constant-time.
+
+`AUTH_KEY`, `AUTH_KEY_PREMIUM`, and `AUTH_KEY_ADMIN` MUST each be distinct cryptographically random secrets generated from at least 32 random bytes. Generate each enabled key separately:
+
+```bash
+openssl rand -base64 32
+```
+
+Never reuse a key across authentication chains. If `AUTH_KEY_ADMIN` equals `AUTH_KEY` or `AUTH_KEY_PREMIUM`, callers holding that proxy key also gain admin access. If `AUTH_KEY_PREMIUM` equals `AUTH_KEY`, the default comparison wins and the premium slot is unreachable.
 
 > [!CAUTION]
 > Use an alt account for the user tokens. Automating a user account is against Discord's terms and can get the account banned.
@@ -26,6 +34,9 @@ All key comparisons are constant-time.
 |---|---|
 | `TOKEN_POOL` | Durable Object namespace for `TokenPoolDO`: the rotating token pool plus the static-token guard. Other Workers can reach the same pool with a binding that sets `"script_name": "discord-api-proxy"`. |
 | Cron `0 4 * * *` | Daily refresh of the Chrome stable major and Discord web build number used by generated fingerprints. |
+
+> [!WARNING]
+> A cross-Worker `TOKEN_POOL` binding is a fully trusted capability, not a restricted public API. Direct Durable Object RPC bypasses the HTTP admin authentication chain: a bound Worker can acquire raw pool token secrets and invoke every administrative operation, including register, unregister, reset, and fingerprint management, without presenting `AUTH_KEY_ADMIN`. Bind the pool only to Workers trusted with `AUTH_KEY_ADMIN` and the Discord token secrets. A binding is not made safe by withholding the admin key from its holder.
 
 ## Request headers
 
@@ -48,11 +59,13 @@ With `X-Proxy-Typing: on` the proxy dispatches `POST /channels/:id/typing`, then
 | Signal | Meaning |
 |---|---|
 | `429 { "error": "Too Many Requests", "retryAfter": <seconds or null> }` | Every 429 is rewritten into this envelope. `Retry-After`, `X-RateLimit-*`, and `X-Proxy-*` headers from the original response are preserved. |
-| `X-Proxy-Block: bucket` / `capacity` | The guard held the request because that identity's budget for the Discord bucket is spent or fully leased. Ordinary; retry after `retryAfter`. |
-| `X-Proxy-Block: captcha` | A captcha challenge was seen for this identity: its circuit is open for 30 minutes. Do not retry sooner and do not switch tokens to route around it. |
-| `X-Proxy-Block: cloudflare` | A Cloudflare edge block was seen: every identity is held (they share one egress IP) for the edge response's `Retry-After` when it is a number of seconds, otherwise (absent or an HTTP date) for 10 minutes. |
+| `X-Proxy-Block: bucket` / `capacity` | A user-token request was held before dispatch: `bucket` marks a spent static-identity bucket budget or a pool cooldown; `capacity` marks a fully leased static-identity budget. Retry after `retryAfter`. Pool cooldown responses include `X-Proxy-Block: bucket`. |
+| `X-Proxy-Block: captcha` | A captcha challenge was seen for a user-token identity: its circuit is open for 30 minutes. Static guard and pool circuit holds carry this header. Do not retry sooner and do not switch tokens to route around it. Bots do not use captcha circuits. |
+| `X-Proxy-Block: cloudflare` | A Cloudflare edge block from a user or bot response opened the shared Durable Object circuit: pool, static-user, and bot requests are held before dispatch because they share one egress IP. Holds carry this header. The duration uses the edge response's numeric `Retry-After`, capped at 1 hour by `MAX_UPSTREAM_CIRCUIT_MS`; absent or HTTP-date values default to 10 minutes. A new block never shortens an already-open circuit. Bots check and report only this circuit; they have no user-token budgets, captcha circuits, or leases. Without a binding, the optional bot circuit RPCs, or a successful circuit check, bot dispatch degrades to unguarded behavior. |
 | `400` with Discord's `Invalid Form Body` shape | A path segment that must be a Discord id (after `guilds`, `channels`, `users`, `messages`, ...) is not a 17-20 digit snowflake. Rejected before any Durable Object or Discord call. |
 | `404 { "error": "Not Found" }` | Unmatched `/custom/*` path; never forwarded. |
+
+`X-Proxy-Block` identifies a proxy-generated pre-dispatch hold, including pool cooldown and circuit responses. An actual Discord 429 is not relabeled as a proxy hold; its usual 429 envelope and preserved upstream headers remain unchanged.
 
 ## Public endpoints
 

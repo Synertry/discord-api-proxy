@@ -153,6 +153,23 @@ describe('chooseToken - unavailable reasons', () => {
     expect(result.unavailable?.retryAfter).toBe(3000);
   });
 
+  it.each([
+    { circuitFirst: true, circuitSoonest: true },
+    { circuitFirst: false, circuitSoonest: true },
+    { circuitFirst: true, circuitSoonest: false },
+    { circuitFirst: false, circuitSoonest: false },
+  ])('keeps the soonest retry paired with its signal regardless of pool order: %j', ({ circuitFirst, circuitSoonest }) => {
+    const captcha = makeToken('captcha', {
+      circuit: { signal: 'captcha', openedAt: NOW, until: NOW + (circuitSoonest ? 3000 : 5000) },
+    });
+    const bucket = makeToken('bucket', { globalCooldownUntil: NOW + (circuitSoonest ? 5000 : 3000) });
+    const result = chooseToken(circuitFirst ? [captcha, bucket] : [bucket, captcha], 'default', ROUTE, NOW);
+    expect(result.chosen).toBeNull();
+    expect(result.unavailable).toMatchObject({ reason: 'cooldown', retryAfter: 3000 });
+    if (result.unavailable?.reason !== 'cooldown') throw new Error('expected cooldown');
+    expect(result.unavailable?.signal).toBe(circuitSoonest ? 'captcha' : undefined);
+  });
+
   it('returns cooldown when bucket is exhausted on every token', () => {
     const pool = [
       makeToken('a', {
@@ -235,14 +252,14 @@ describe('evaluateTokenEligibility', () => {
       ineligibleGuilds: [{ guildId: '219', expiresAt: NOW + 3000 }],
     });
     const r = evaluateTokenEligibility(t, 'default', ROUTE, NOW, '219');
-    expect(r).toEqual({ ok: false, reason: 'cooldown', retryAfter: 30 * 60 * 1000 });
+    expect(r).toEqual({ ok: false, reason: 'cooldown', retryAfter: 30 * 60 * 1000, signal: 'captcha' });
   });
 
   it('reports the DO-wide upstream circuit for its full duration over a sooner guild-ineligibility expiry', () => {
     const t = makeToken('a', { ineligibleGuilds: [{ guildId: '219', expiresAt: NOW + 3000 }] });
     const upstream = { signal: 'cloudflare' as const, until: NOW + 10 * 60 * 1000, openedAt: NOW };
     const r = evaluateTokenEligibility(t, 'default', ROUTE, NOW, '219', upstream);
-    expect(r).toEqual({ ok: false, reason: 'cooldown', retryAfter: 10 * 60 * 1000 });
+    expect(r).toEqual({ ok: false, reason: 'cooldown', retryAfter: 10 * 60 * 1000, signal: 'cloudflare' });
   });
 });
 

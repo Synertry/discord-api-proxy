@@ -25,7 +25,7 @@ import type { Bindings } from '../../src/types';
 import { composeBotUserAgent } from '../../src/fingerprint/compose';
 import { FALLBACK_PROFILE_ID, resolveProfileId } from '../../src/fingerprint/profiles';
 import { FALLBACK_CHROME_MAJOR } from '../../src/fingerprint/versions';
-import type { AcquireResult, ReleaseInput, TokenPoolClient } from '../../src/rotator/types';
+import type { AcquireResult, IdentityBlock, ReleaseInput, TokenPoolClient } from '../../src/rotator/types';
 
 const MOCK_ENV: Bindings = {
   AUTH_KEY: 'secret-key',
@@ -105,6 +105,188 @@ describe('Proxy Route (bot path)', () => {
   });
 });
 
+describe('Proxy Route (bot DO-wide upstream circuit)', () => {
+  const botRequest = () => new Request('http://localhost/users/@me', { headers: { 'x-auth-key': 'secret-key' } });
+
+  it('holds a bot request with the Cloudflare 429 envelope without fetching when the upstream circuit is open', async () => {
+    const checkUpstreamCircuit = vi.fn(async (): Promise<IdentityBlock | null> => ({
+      reason: 'cooldown',
+      retryAfter: 4500,
+      signal: 'cloudflare',
+    }));
+    const reportUpstreamOutcome = vi.fn(async () => undefined);
+    const client: TokenPoolClient = {
+      acquire: vi.fn(),
+      release: vi.fn(),
+      checkUpstreamCircuit,
+      reportUpstreamOutcome,
+    };
+    const mockFetch = vi.fn();
+    const res = await createApp(mockFetch as unknown as typeof fetch, client).request(botRequest(), undefined, MOCK_ENV);
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get('X-Proxy-Block')).toBe('cloudflare');
+    expect(res.headers.get('Retry-After')).toBe('5');
+    expect(await res.json()).toEqual({ error: 'Too Many Requests', retryAfter: 5 });
+    expect(checkUpstreamCircuit).toHaveBeenCalledTimes(1);
+    expect(reportUpstreamOutcome).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('reports a bot Cloudflare response and holds the subsequent bot request across the shared upstream circuit', async () => {
+    let block: IdentityBlock | null = null;
+    const checkUpstreamCircuit = vi.fn(async () => block);
+    const reportUpstreamOutcome = vi.fn(async (outcome: ReleaseInput) => {
+      if (outcome.signal === 'cloudflare') block = { reason: 'cooldown', retryAfter: 600_000, signal: 'cloudflare' };
+    });
+    const client: TokenPoolClient = {
+      acquire: vi.fn(),
+      release: vi.fn(),
+      checkUpstreamCircuit,
+      reportUpstreamOutcome,
+    };
+    const html = '<html>Cloudflare challenge</html>';
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(html, {
+        status: 403,
+        headers: { 'Content-Type': 'text/html', 'CF-Ray': 'test-ray' },
+      }),
+    );
+    const app = createApp(mockFetch as unknown as typeof fetch, client);
+    const first = await app.request(botRequest(), undefined, MOCK_ENV);
+    expect(first.status).toBe(403);
+    expect(first.headers.get('CF-Ray')).toBe('test-ray');
+    expect(await first.text()).toBe(html);
+    expect(reportUpstreamOutcome).toHaveBeenCalledTimes(1);
+    expect(reportUpstreamOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 403,
+        routeKey: 'GET:/users/@me',
+        signal: 'cloudflare',
+      }),
+    );
+
+    const second = await app.request(botRequest(), undefined, MOCK_ENV);
+    expect(second.status).toBe(429);
+    expect(second.headers.get('X-Proxy-Block')).toBe('cloudflare');
+    expect(checkUpstreamCircuit).toHaveBeenCalledTimes(2);
+    expect(reportUpstreamOutcome).toHaveBeenCalledTimes(1);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses only the circuit check RPC for a clean bot request, without acquiring, leasing, preparing, or reporting', async () => {
+    const checkUpstreamCircuit = vi.fn(async () => null);
+    const reportUpstreamOutcome = vi.fn(async () => undefined);
+    const client: TokenPoolClient = {
+      acquire: vi.fn(),
+      acquireByLabel: vi.fn(),
+      release: vi.fn(),
+      prepareStatic: vi.fn(),
+      leaseStatic: vi.fn(),
+      settleStatic: vi.fn(),
+      getClientVersions: vi.fn(),
+      checkUpstreamCircuit,
+      reportUpstreamOutcome,
+    };
+    const mockFetch = vi.fn().mockResolvedValue(jsonResponse({ id: 'bot' }));
+    const res = await createApp(mockFetch as unknown as typeof fetch, client).request(botRequest(), undefined, MOCK_ENV);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id: 'bot' });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(checkUpstreamCircuit).toHaveBeenCalledTimes(1);
+    for (const rpc of [
+      client.acquire,
+      client.acquireByLabel,
+      client.release,
+      client.prepareStatic,
+      client.leaseStatic,
+      client.settleStatic,
+      client.getClientVersions,
+      reportUpstreamOutcome,
+    ])
+      expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it.each(['both', 'check', 'report'] as const)(
+    'dispatches bots unguarded when %s upstream circuit methods are absent',
+    async (missing) => {
+      const checkUpstreamCircuit = vi.fn(async (): Promise<IdentityBlock | null> => ({
+        reason: 'cooldown',
+        retryAfter: 600_000,
+        signal: 'cloudflare',
+      }));
+      const reportUpstreamOutcome = vi.fn(async () => undefined);
+      const client: TokenPoolClient = { acquire: vi.fn(), release: vi.fn() };
+      if (missing === 'report') client.checkUpstreamCircuit = checkUpstreamCircuit;
+      if (missing === 'check') client.reportUpstreamOutcome = reportUpstreamOutcome;
+      const mockFetch = vi.fn().mockResolvedValue(new Response('OK'));
+      const res = await createApp(mockFetch as unknown as typeof fetch, client).request(botRequest(), undefined, MOCK_ENV);
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe('OK');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(checkUpstreamCircuit).not.toHaveBeenCalled();
+      expect(reportUpstreamOutcome).not.toHaveBeenCalled();
+      expect(client.acquire).not.toHaveBeenCalled();
+    },
+  );
+
+  it('fails open when the bot upstream circuit check throws', async () => {
+    const checkUpstreamCircuit = vi.fn().mockRejectedValue(new Error('DO unavailable'));
+    const reportUpstreamOutcome = vi.fn(async () => undefined);
+    const client: TokenPoolClient = { acquire: vi.fn(), release: vi.fn(), checkUpstreamCircuit, reportUpstreamOutcome };
+    const mockFetch = vi.fn().mockResolvedValue(new Response('OK'));
+    const res = await createApp(mockFetch as unknown as typeof fetch, client).request(botRequest(), undefined, MOCK_ENV);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('OK');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(checkUpstreamCircuit).toHaveBeenCalledTimes(1);
+    expect(reportUpstreamOutcome).not.toHaveBeenCalled();
+  });
+
+  it('preserves the upstream bot response when reporting a Cloudflare outcome throws', async () => {
+    const reportUpstreamOutcome = vi.fn().mockRejectedValue(new Error('DO unavailable'));
+    const client: TokenPoolClient = {
+      acquire: vi.fn(),
+      release: vi.fn(),
+      checkUpstreamCircuit: vi.fn(async () => null),
+      reportUpstreamOutcome,
+    };
+    const html = '<html>Cloudflare challenge</html>';
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(html, {
+        status: 503,
+        headers: { 'Content-Type': 'text/html', 'CF-Ray': 'report-failure-ray' },
+      }),
+    );
+    const res = await createApp(mockFetch as unknown as typeof fetch, client).request(botRequest(), undefined, MOCK_ENV);
+
+    expect(reportUpstreamOutcome).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
+    expect(res.headers.get('CF-Ray')).toBe('report-failure-ray');
+    expect(res.headers.get('X-Proxy-Block')).toBeNull();
+    expect(await res.text()).toBe(html);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not report bot captcha responses to the DO-wide upstream circuit', async () => {
+    const reportUpstreamOutcome = vi.fn(async () => undefined);
+    const checkUpstreamCircuit = vi.fn(async () => null);
+    const client: TokenPoolClient = { acquire: vi.fn(), release: vi.fn(), checkUpstreamCircuit, reportUpstreamOutcome };
+    const captcha = { captcha_key: ['challenge'], captcha_sitekey: 'sitekey' };
+    const mockFetch = vi.fn().mockResolvedValue(jsonResponse(captcha, 400));
+    const res = await createApp(mockFetch as unknown as typeof fetch, client).request(botRequest(), undefined, MOCK_ENV);
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual(captcha);
+    expect(checkUpstreamCircuit).toHaveBeenCalledTimes(1);
+    expect(reportUpstreamOutcome).not.toHaveBeenCalled();
+    expect(client.acquire).not.toHaveBeenCalled();
+  });
+});
+
 describe('Proxy Route (static user path, header allowlist + fingerprint)', () => {
   it('forwards user-token requests with the FALLBACK fingerprint header set on /guilds paths', async () => {
     const mockFetch = vi.fn().mockResolvedValue(new Response('OK', { status: 200 }));
@@ -175,6 +357,7 @@ describe('Proxy Route (429 interceptor)', () => {
     const req = new Request('http://localhost/users/@me', { method: 'GET', headers: { 'x-auth-key': 'secret-key' } });
     const res = await app.request(req, undefined, MOCK_ENV);
     expect(res.status).toBe(429);
+    expect(res.headers.get('X-Proxy-Block')).toBeNull();
     const body = (await res.json()) as { error: string; retryAfter: number };
     expect(body.error).toBe('Too Many Requests');
     expect(body.retryAfter).toBe(1.5);
@@ -303,9 +486,7 @@ describe('Proxy Route (message-send body fill and opt-in typing)', () => {
       body: '{"content":"hi","embed":{"title":"x"}}',
     });
     await app.request(req, undefined, MOCK_ENV);
-    expect(callInit(mockFetch).body).toMatch(
-      /^\{"content":"hi","embed":\{"title":"x"\},"nonce":"\d{17,20}","tts":false,"flags":0\}$/,
-    );
+    expect(callInit(mockFetch).body).toMatch(/^\{"content":"hi","embed":\{"title":"x"\},"nonce":"\d{17,20}","tts":false,"flags":0\}$/);
   });
 
   it('forwards a malformed JSON body unchanged rather than crashing', async () => {
@@ -656,7 +837,27 @@ describe('Proxy Route (pool acquire, auto selector)', () => {
     const body = (await res.json()) as { retryAfter: number };
     expect(body.retryAfter).toBe(5);
     expect(res.headers.get('Retry-After')).toBe('5');
+    expect(res.headers.get('X-Proxy-Block')).toBe('bucket');
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a DO-wide Cloudflare pool cooldown as a Cloudflare hold without fetching', async () => {
+    const client: TokenPoolClient = {
+      acquire: async () => ({ ok: false, reason: 'cooldown', retryAfter: 600_000, signal: 'cloudflare' }),
+      release: vi.fn(),
+    };
+    const mockFetch = vi.fn();
+    const res = await createApp(mockFetch as unknown as typeof fetch, client).request(
+      new Request('http://localhost/guilds/219564597349318656/messages/search', { headers: { 'x-auth-key': 'secret-key' } }),
+      undefined,
+      MOCK_ENV,
+    );
+    expect(res.status).toBe(429);
+    expect(res.headers.get('X-Proxy-Block')).toBe('cloudflare');
+    expect(res.headers.get('Retry-After')).toBe('600');
+    expect(await res.json()).toEqual({ error: 'Too Many Requests', retryAfter: 600 });
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(client.release).not.toHaveBeenCalled();
   });
 
   it('falls through to the static token when the pool is empty (graceful fallback)', async () => {
@@ -802,6 +1003,35 @@ describe('Proxy Route (pool acquire, pinned label selector - no graceful fallbac
       'GET:/guilds/219564597349318656/messages/search',
       '219564597349318656',
     );
+  });
+
+  it('surfaces a pinned captcha cooldown as a captcha hold without fetching or falling back', async () => {
+    const client: TokenPoolClient = {
+      acquire: vi.fn(),
+      acquireByLabel: vi.fn(async (): Promise<AcquireResult> => ({
+        ok: false,
+        reason: 'cooldown',
+        retryAfter: 1_800_000,
+        signal: 'captcha',
+      })),
+      release: vi.fn(),
+    };
+    const mockFetch = vi.fn();
+    const res = await createApp(mockFetch as unknown as typeof fetch, client).request(
+      new Request('http://localhost/guilds/219564597349318656/messages/search', {
+        headers: { 'x-auth-key': 'secret-key', 'X-Proxy-Token': 'captcha-token' },
+      }),
+      undefined,
+      MOCK_ENV,
+    );
+    expect(res.status).toBe(429);
+    expect(res.headers.get('X-Proxy-Block')).toBe('captcha');
+    expect(res.headers.get('Retry-After')).toBe('1800');
+    expect(await res.json()).toEqual({ error: 'Too Many Requests', retryAfter: 1800 });
+    expect(client.acquireByLabel).toHaveBeenCalledTimes(1);
+    expect(client.acquire).not.toHaveBeenCalled();
+    expect(client.release).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('returns 503 when the pinned label is not found (no graceful fallback)', async () => {

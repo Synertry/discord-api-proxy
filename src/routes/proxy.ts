@@ -31,7 +31,7 @@
  * early return between acquiring and this handler running.
  *
  * Bot requests carry only the Discord-compliant `DiscordBot (...)` UA and
- * never touch the pool, the guard, or the fingerprint layer at all.
+ * check/report the shared Cloudflare circuit without identity budgets or leases.
  *
  * User-token requests (`user-default` / `user-premium`, whether served by a
  * pool token or the static token): full browser-like fingerprint headers via
@@ -54,7 +54,7 @@ import { composeRequestHeaders } from '../fingerprint/headers';
 import { contextPropertiesFor } from '../fingerprint/context-properties';
 import { resolveProfileId } from '../fingerprint/profiles';
 import { resolveClientVersions } from '../fingerprint/versions';
-import { blockResponse } from '../rotator/static-guard';
+import { blockResponse, createUpstreamGuard } from '../rotator/static-guard';
 import type { StaticGuard } from '../rotator/static-guard';
 import { inspectResponse } from '../rotator/signals';
 import { retryDelayMs } from '../rotator/budget';
@@ -156,12 +156,6 @@ proxyRoute.all('/*', async (c) => {
       typingMaxMs = parsed.maxMs;
     }
 
-    // ---- Bot: no identity, no guard, no pool. ----
-    if (kind === 'bot') {
-      const headers = await composeRequestHeaders({ token: c.var.discordToken, tokenKind: 'bot', buildHash: BUILD_HASH, inbound: c.req.raw.headers });
-      return await dispatch(fetcher, discordUrl, method, headers, bodyInit);
-    }
-
     // ---- Resolve a client (best effort). identityMiddleware already resolved
     // one for most requests; a missing client here (binding failure on an
     // auto-selector pool request, or no binding at all) just means the
@@ -174,6 +168,23 @@ proxyRoute.all('/*', async (c) => {
       } catch (err: unknown) {
         log.error('TOKEN_POOL binding unavailable:', err);
       }
+    }
+
+    // ---- Bot: only the shared edge circuit, never an identity budget or lease. ----
+    if (kind === 'bot') {
+      const upstreamGuard = createUpstreamGuard(client);
+      const block = await upstreamGuard?.check();
+      if (block) return blockResponse(c, block);
+      const headers = await composeRequestHeaders({
+        token: c.var.discordToken,
+        tokenKind: 'bot',
+        buildHash: BUILD_HASH,
+        inbound: c.req.raw.headers,
+      });
+      const response = await dispatch(fetcher, discordUrl, method, headers, bodyInit);
+      const outcome = await inspectResponse(response, budgetKey, guildId);
+      await upstreamGuard?.report(outcome);
+      return response;
     }
 
     const versions = c.var.clientVersions ?? resolveClientVersions(null, Date.now());
@@ -273,11 +284,11 @@ proxyRoute.all('/*', async (c) => {
       if (plan && client && poolLease && !poolReleased) {
         // The pool release key must equal the acquire key, and `plan.routeKey`
         // is exactly that budget key - the plan that produced this lease.
-        await client.release(poolLease.label, poolLease.requestId, { status: 599, routeKey: plan.routeKey }).catch(
-          (cleanupErr: unknown) => {
+        await client
+          .release(poolLease.label, poolLease.requestId, { status: 599, routeKey: plan.routeKey })
+          .catch((cleanupErr: unknown) => {
             log.error('pool release cleanup failed:', cleanupErr);
-          },
-        );
+          });
       }
       throw err;
     }
@@ -434,27 +445,19 @@ async function attemptPoolAcquire(client: TokenPoolClient, plan: PoolPlan): Prom
 
     if (plan.selector !== 'auto') {
       if (result.reason === 'cooldown') {
-        return { kind: 'blocked', response: (c) => cooldownResponse(c, result.retryAfter) };
+        return { kind: 'blocked', response: (c) => blockResponse(c, result) };
       }
       return { kind: 'blocked', response: (c) => c.json({ error: 'token pool unavailable', reason: result.reason }, 503) };
     }
 
     if (result.reason === 'cooldown') {
-      return { kind: 'blocked', response: (c) => cooldownResponse(c, result.retryAfter) };
+      return { kind: 'blocked', response: (c) => blockResponse(c, result) };
     }
     return { kind: 'fallback' };
   } catch (err: unknown) {
     log.error('TOKEN_POOL acquire failed:', err);
     return { kind: 'blocked', response: (c) => c.json({ error: 'token pool unavailable' }, 503) };
   }
-}
-
-function cooldownResponse(
-  c: { json: (body: unknown, status: 429, headers?: Record<string, string>) => Response },
-  retryAfterMs: number,
-): Response {
-  const seconds = Math.ceil(retryAfterMs / 1000);
-  return c.json({ error: 'Too Many Requests', retryAfter: seconds }, 429, { 'Retry-After': String(seconds) });
 }
 
 function poolIdentity(attempt: Extract<PoolAcquireOutcome, { kind: 'acquired' }>, versions: ClientVersions): RequestIdentity {

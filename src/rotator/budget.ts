@@ -34,6 +34,9 @@ export const CAPTCHA_CIRCUIT_MS = 30 * 60 * 1000;
 /** Default duration a Cloudflare/edge-level block circuits the whole DO for, when the response carried no `Retry-After`. */
 export const CLOUDFLARE_CIRCUIT_MS = 10 * 60 * 1000;
 
+/** Maximum edge Retry-After duration used when opening or extending the shared upstream circuit. */
+export const MAX_UPSTREAM_CIRCUIT_MS = 60 * 60 * 1000;
+
 /** 429 cooldown backoff: bench the identity for `retryAfter * this factor`, matching Discord's own guidance to back off further than the bare minimum. */
 export const COOLDOWN_BACKOFF_FACTOR = 1.5;
 
@@ -257,7 +260,12 @@ export function retryDelayMs(outcome: { retryAfterMs?: number }): number {
  */
 export function openUpstreamCircuit(existing: IdentityCircuit | null, outcome: ReleaseInput, now: number): IdentityCircuit | null {
   if (outcome.signal === 'cloudflare') {
-    return { signal: 'cloudflare', until: now + (outcome.retryAfterMs ?? CLOUDFLARE_CIRCUIT_MS), openedAt: now };
+    // A non-finite or negative delay (NaN arrives intact over RPC structured clone) falls back to the default length.
+    const requested = outcome.retryAfterMs;
+    const lengthMs = requested !== undefined && Number.isFinite(requested) && requested >= 0 ? requested : CLOUDFLARE_CIRCUIT_MS;
+    const until = now + Math.min(lengthMs, MAX_UPSTREAM_CIRCUIT_MS);
+    if (existing && existing.until > now && existing.until >= until) return existing;
+    return { signal: 'cloudflare', until, openedAt: now };
   }
   if (existing && existing.signal === 'cloudflare' && existing.until <= now && outcome.status >= 200 && outcome.status < 300) {
     return null;

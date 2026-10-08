@@ -492,4 +492,14 @@ describe('openUpstreamCircuit', () => {
     const result = openUpstreamCircuit(existing, { status: 200, routeKey: 'GET:/x' }, NOW);
     expect(result).toBeNull();
   });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -5000])(
+    'falls back to the default length for a non-finite or negative retryAfterMs (%s) and keeps an open circuit',
+    (retryAfterMs) => {
+      const fresh = openUpstreamCircuit(null, { status: 403, routeKey: 'GET:/x', signal: 'cloudflare', retryAfterMs }, NOW);
+      expect(fresh?.until).toBe(NOW + CLOUDFLARE_CIRCUIT_MS);
+      const existing: IdentityCircuit = { signal: 'cloudflare', until: NOW + CLOUDFLARE_CIRCUIT_MS + 5000, openedAt: NOW - 100 };
+      expect(openUpstreamCircuit(existing, { status: 403, routeKey: 'GET:/x', signal: 'cloudflare', retryAfterMs }, NOW)).toEqual(existing);
+    },
+  );
 });
