@@ -184,8 +184,8 @@ function hydrateStaticGuard(raw: StaticIdentityState, identityHash: string): Sta
 export class TokenPoolDO extends DurableObject<Bindings> {
   /**
    * Tail of this instance's mutation queue. Every read-modify-write RPC
-   * (acquire, acquireByLabel, release, leaseStatic, settleStatic, register,
-   * reset, setTokenFingerprintProfile) runs through `#serialize`, so two calls
+   * (acquire, acquireByLabel, release, leaseStatic, settleStatic,
+   * reportUpstreamOutcome, register, reset, setTokenFingerprintProfile) runs through `#serialize`, so two calls
    * can never both read the same record, both decide from it, and have the
    * later write silently discard the earlier one. Input gates are documented
    * to prevent that interleaving for storage calls, but a lost lease (two

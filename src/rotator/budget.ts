@@ -260,7 +260,10 @@ export function retryDelayMs(outcome: { retryAfterMs?: number }): number {
  */
 export function openUpstreamCircuit(existing: IdentityCircuit | null, outcome: ReleaseInput, now: number): IdentityCircuit | null {
   if (outcome.signal === 'cloudflare') {
-    const until = now + Math.min(outcome.retryAfterMs ?? CLOUDFLARE_CIRCUIT_MS, MAX_UPSTREAM_CIRCUIT_MS);
+    // A non-finite or negative delay (NaN arrives intact over RPC structured clone) falls back to the default length.
+    const requested = outcome.retryAfterMs;
+    const lengthMs = requested !== undefined && Number.isFinite(requested) && requested >= 0 ? requested : CLOUDFLARE_CIRCUIT_MS;
+    const until = now + Math.min(lengthMs, MAX_UPSTREAM_CIRCUIT_MS);
     if (existing && existing.until > now && existing.until >= until) return existing;
     return { signal: 'cloudflare', until, openedAt: now };
   }
