@@ -18,8 +18,43 @@
  * rejection.
  */
 
-import type { Context } from 'hono';
 import type { IdentityBlock, ReleaseInput, RouteKey, TokenPoolClient } from './types';
+import { createLogger } from '../logger';
+
+const log = createLogger('upstream-guard');
+
+/** Best-effort edge check/report without any identity, budget, or lease. */
+export interface UpstreamGuard {
+  check(): Promise<IdentityBlock | null>;
+  report(outcome: ReleaseInput): Promise<void>;
+}
+
+export function createUpstreamGuard(client: TokenPoolClient | undefined): UpstreamGuard | undefined {
+  if (!client) return undefined;
+  if (!client.checkUpstreamCircuit || !client.reportUpstreamOutcome) {
+    const err = new Error('upstream circuit RPCs unavailable');
+    log.error('upstream circuit guard unavailable, dispatching unguarded:', err);
+    return undefined;
+  }
+  return {
+    async check() {
+      try {
+        return await client.checkUpstreamCircuit!();
+      } catch (err: unknown) {
+        log.error('upstream circuit check failed, dispatching unguarded:', err);
+        return null;
+      }
+    },
+    async report(outcome) {
+      if (outcome.signal !== 'cloudflare') return;
+      try {
+        await client.reportUpstreamOutcome!(outcome);
+      } catch (err: unknown) {
+        log.error('upstream circuit report failed:', err);
+      }
+    },
+  };
+}
 
 /** Per-request lease/settle pair, closed over the identity's pre-computed hash. */
 export interface StaticGuard {
@@ -53,7 +88,10 @@ export function createStaticGuard(client: TokenPoolClient, identityHash: string)
 }
 
 /** 429 envelope for a pre-emptive guard block (circuit, cooldown, or capacity) - never a genuine Discord response. */
-export function blockResponse(c: Context, block: IdentityBlock): Response {
+export function blockResponse(
+  c: { json: (body: unknown, status: 429, headers?: Record<string, string>) => Response },
+  block: IdentityBlock,
+): Response {
   const retryAfterSeconds = Math.ceil(block.retryAfter / 1000);
   return c.json({ error: 'Too Many Requests', retryAfter: retryAfterSeconds }, 429, {
     'Retry-After': String(retryAfterSeconds),
