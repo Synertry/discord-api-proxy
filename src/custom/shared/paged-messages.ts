@@ -12,17 +12,21 @@
  * read an entire channel's history. One implementation, so every such route
  * gets the same:
  *
- * - Leases the identity's static guard immediately before each page's fetch
- *   and settles it immediately after (same lease-at-point-of-use discipline
+ * - User tokens lease the identity's static guard immediately before each page's fetch
+ *   and settle it immediately after (same lease-at-point-of-use discipline
  *   as proxy.ts), enforcing `minGapMs` pacing between pages regardless of
  *   Discord's own bucket state - the Discord hard rule's "never send
  *   back-to-back requests" floor applies to a 50-page channel dump exactly
  *   as much as to a single proxied call.
+ * - Bot tokens check the shared upstream circuit before every fetch and report
+ *   Cloudflare responses, without taking identity leases or recording captcha
+ *   signals. Missing upstream RPCs or RPC failures degrade to unguarded dispatch.
  * - Retries a live 429 with the shared `retryDelayMs` backoff, matching
  *   every other 429 retry path in this codebase.
- * - Surfaces a guard block as `IdentityBlockedError` (re-exported from
+ * - Surfaces a user guard block as `IdentityBlockedError` (re-exported from
  *   `rotator/static-guard`) after one short wait-and-retry, rather than
- *   failing the whole fetch on the first pre-emptive block.
+ *   failing the whole fetch on the first pre-emptive block. A bot upstream
+ *   circuit block is surfaced immediately without waiting.
  *
  * Headers are composed ONCE by the caller (via `composeRequestHeaders`) and
  * passed in - unlike the fingerprint, `Authorization` never changes between
@@ -32,9 +36,9 @@
 import { deriveBudgetKey } from '../../rotator/bucket';
 import { retryDelayMs } from '../../rotator/budget';
 import { inspectResponse } from '../../rotator/signals';
-import { IdentityBlockedError } from '../../rotator/static-guard';
+import { createUpstreamGuard, IdentityBlockedError } from '../../rotator/static-guard';
 import type { StaticGuard } from '../../rotator/static-guard';
-import type { ReleaseInput, RouteKey } from '../../rotator/types';
+import type { ReleaseInput, RouteKey, TokenPoolClient } from '../../rotator/types';
 import { createLogger } from '../../logger';
 
 const log = createLogger('pager');
@@ -67,6 +71,7 @@ export interface PagerOptions {
   headers: Headers;
   fetcher: typeof fetch;
   guard?: StaticGuard;
+  tokenPoolClient?: TokenPoolClient;
   maxMessages: number;
   pageLimit: number;
   minGapMs?: number;
@@ -144,11 +149,20 @@ interface PageResult<T> {
   dispatchedAt: number;
 }
 
-/** Fetch and parse one page, leasing the guard immediately before and settling immediately after, with 429 and guard-block retry. */
-async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOptions, wait: (ms: number) => Promise<void>): Promise<PageResult<T>> {
+/** Fetch and parse one page, checking the bot upstream circuit or leasing the user guard at dispatch, with existing 429 and user guard-block retry. */
+async function fetchOnePage<T extends PagedMessage>(
+  url: string,
+  opts: PagerOptions,
+  wait: (ms: number) => Promise<void>,
+): Promise<PageResult<T>> {
   const budgetRouteKey = deriveBudgetKey('GET', `/channels/${opts.channelId}/messages`);
+  const isBot = /^Bot\s/i.test(opts.headers.get('Authorization') ?? '');
+  const guard = isBot ? undefined : opts.guard;
+  const upstreamGuard = isBot ? createUpstreamGuard(opts.tokenPoolClient) : undefined;
   for (let attempt429 = 0; attempt429 <= MAX_429_RETRIES; attempt429++) {
-    const lease = await leaseWithOneRetry(opts.guard, budgetRouteKey, wait);
+    const upstreamBlock = await upstreamGuard?.check();
+    if (upstreamBlock) throw new IdentityBlockedError(upstreamBlock);
+    const lease = await leaseWithOneRetry(guard, budgetRouteKey, wait);
     const dispatchedAt = Date.now();
 
     let response: Response;
@@ -160,7 +174,7 @@ async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOpti
       });
     } catch (err: unknown) {
       if (lease) {
-        await opts.guard?.settle(lease.requestId, { status: 599, routeKey: budgetRouteKey }).catch((cleanupErr: unknown) => {
+        await guard?.settle(lease.requestId, { status: 599, routeKey: budgetRouteKey }).catch((cleanupErr: unknown) => {
           log.error('guard cleanup failed:', cleanupErr);
         });
       }
@@ -176,9 +190,9 @@ async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOpti
       // error.
       try {
         outcome = await inspectResponse(response, budgetRouteKey);
-        await opts.guard?.settle(lease.requestId, outcome);
+        await guard?.settle(lease.requestId, outcome);
       } catch (err: unknown) {
-        await opts.guard?.settle(lease.requestId, { status: 599, routeKey: budgetRouteKey }).catch((cleanupErr: unknown) => {
+        await guard?.settle(lease.requestId, { status: 599, routeKey: budgetRouteKey }).catch((cleanupErr: unknown) => {
           log.error('guard cleanup failed:', cleanupErr);
         });
         throw err;
@@ -186,6 +200,7 @@ async function fetchOnePage<T extends PagedMessage>(url: string, opts: PagerOpti
     } else {
       outcome = await inspectResponse(response, budgetRouteKey);
     }
+    if (outcome.signal === 'cloudflare') await upstreamGuard?.report(outcome);
 
     if (response.status === 429 && attempt429 < MAX_429_RETRIES) {
       const delay = retryDelayMs(outcome);

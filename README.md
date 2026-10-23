@@ -17,7 +17,7 @@ Original motivation was for my Google Sheets to be able to call the Discord API,
 - **Bot and user tokens** - picked per request by header or path, with an optional premium slot. ([token pool](docs/token-pool.md))
 - **Token pool** - rotates registered user tokens with per-bucket cooldowns in a Durable Object. ([token pool](docs/token-pool.md))
 - **Client identity** - one consistent, version-tracked browser fingerprint per user token. ([client identity](docs/client-identity.md))
-- **Identity guard** - per-bucket budgets plus captcha and Cloudflare circuits for every user token. ([client identity](docs/client-identity.md#identity-guard))
+- **Identity guard** - per-bucket budgets and captcha circuits for user tokens, plus a shared Cloudflare circuit for user and bot requests. ([client identity](docs/client-identity.md#identity-guard))
 - **Humanized sends** - optional typing indicator and length-scaled delay before a message. ([configuration](docs/configuration.md#typing-delay))
 - **Admin API** - manage pool tokens, fingerprints, and identities behind a separate key. ([token pool](docs/token-pool.md#admin-api))
 - **Snowflake validation** - malformed ids answer a Discord-shaped 400 before any upstream call. ([configuration](docs/configuration.md#responses-the-proxy-adds))
@@ -41,6 +41,8 @@ DISCORD_TOKEN_USER=your-user-token
 AUTH_KEY=your-api-key
 ```
 
+Generate `AUTH_KEY` from at least 32 cryptographically random bytes, for example with `openssl rand -base64 32`. If enabling `AUTH_KEY_PREMIUM` or `AUTH_KEY_ADMIN`, generate each separately and never reuse a value across these keys. See [Configuration](docs/configuration.md#secrets) for the consequences of key reuse.
+
 Start the dev server and send a first request:
 
 ```bash
@@ -62,6 +64,7 @@ Rate Limit Interceptor -> Auth -> Discord Context -> Snowflake Validator -> Iden
 - `X-Proxy-Context: user|bot` picks the token; without it, `/guilds` paths use the user token and everything else the bot token.
 - `AUTH_KEY` selects the default user token, `AUTH_KEY_PREMIUM` the premium one; allow-listed read routes rotate through the registered pool first.
 - Pool tokens and static user tokens are leased from the guard immediately before each Discord call and released right after.
+- Bot requests check the shared Cloudflare circuit before dispatch and report Cloudflare edge blocks afterward, without user-token budgets, captcha circuits, or leases. Missing bindings or optional circuit RPCs and failed circuit RPCs degrade to unguarded bot handling.
 
 The full diagram and source layout are in [Architecture](docs/architecture.md).
 
@@ -74,7 +77,7 @@ The full diagram and source layout are in [Architecture](docs/architecture.md).
 | `X-Proxy-Token` | request | `auto`, `static`, or a pool label. |
 | `X-Proxy-Typing` | request | `on`: typing indicator plus humanized delay before a message send. |
 | `X-Proxy-Typing-Max-Ms` | request | `1000`-`30000`: longer typing for long messages. |
-| `X-Proxy-Block` | response | `bucket`, `capacity`, `captcha`, or `cloudflare` on a guard-held 429. |
+| `X-Proxy-Block` | response | `bucket`, `capacity`, `captcha`, or `cloudflare` on a proxy-held 429, including pool cooldown and circuit holds. |
 
 Details and status codes: [Configuration](docs/configuration.md).
 

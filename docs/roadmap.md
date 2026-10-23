@@ -29,6 +29,12 @@ Realistic per-identity fingerprinting, header allowlisting, and an identity guar
 - [ ] **`CF-Worker` / `CF-Connecting-IP` on cross-zone subrequests.** Cloudflare platform behavior on Worker-to-Worker-zone requests; not something request code can suppress.
 - [ ] **Per-request grease rotation.** `Sec-CH-UA`'s greased brand is fixed per Chrome major (matching a real client's per-launch, not per-request, grease selection) rather than rotated every call. Matches real client behavior; not a gap unless a specific detection vector is found.
 
+## Deployment pipeline
+
+### Accepted gaps
+
+- [ ] **Dependabot fast path bypasses the approval gate.** `ci.yaml` detects a Dependabot bump from commit-message text only, skips lint and test, and pushes the whole `main` head to `production`, so any merged but unapproved change ships with the bump. Documented in [Deployment](deployment.md) (PR #179); the workflow is unchanged by decision. Fix when revisited: push only when the `main..production` diff touches nothing but `package.json` and `bun.lock`, detect Dependabot from the merged PR author, and keep tests on.
+
 ## Closed experiments (do not re-attempt without re-checking)
 
 - **`bun --bun ./node_modules/wrangler/bin/wrangler.js ...` for CI deploy commands** - tried in PR #53, silently broke `wrangler versions upload` (banner prints, exit 0, no upload). Root cause: wrangler's `bin/wrangler.js` entry re-spawns the dist CLI via `process.execPath` with node-only flags (`--no-warnings`, `--experimental-vm-modules`); under Bun the child becomes `bun --no-warnings --experimental-vm-modules .../cli.js` and Bun's Node-API emulation isn't deep enough for the upload path. Reverted to the PR #38 pattern (`actions/setup-node@v6.4.0` + `node ./node_modules/wrangler/bin/wrangler.js ...`) in PR #55. Don't re-attempt without verifying `wrangler versions upload` succeeds on CI first.

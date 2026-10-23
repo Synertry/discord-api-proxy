@@ -1,6 +1,6 @@
 # Architecture
 
-The proxy is a [Hono](https://hono.dev) app deployed as a Cloudflare Worker (`src/index.ts`). One Durable Object class, `TokenPoolDO`, backs both the rotating token pool and the guard that protects the static user tokens.
+The proxy is a [Hono](https://hono.dev) app deployed as a Cloudflare Worker (`src/index.ts`). One Durable Object class, `TokenPoolDO`, backs the rotating token pool, the guard that protects static user tokens, and a shared Cloudflare circuit that also holds bot requests.
 
 ## Middleware sieve
 
@@ -48,6 +48,8 @@ Request
 
 > [!NOTE]
 > Custom endpoints under `/custom/*` come first; an unmatched `/custom/*` path answers `404` and is never forwarded. Everything outside `/custom` falls through to the proxy forwarder.
+
+User-token dispatch acquires a pool token or leases the static guard at the point of use. Bot dispatch instead checks the shared Cloudflare circuit before fetching and reports only Cloudflare response outcomes afterward through optional `TokenPoolClient` RPCs (`checkUpstreamCircuit` and `reportUpstreamOutcome`). A bot edge block can therefore hold all three dispatch paths. Bots have no captcha circuits, budgets, or leases; missing bindings or RPC methods and failed circuit RPCs degrade to unguarded bot handling. Proxy-generated pool cooldown and circuit holds include `X-Proxy-Block`; actual Discord 429 responses remain upstream responses, not proxy holds.
 
 A daily cron (`0 4 * * *` UTC) runs `src/scheduled/client-versions-refresh.ts`, which scrapes the current Chrome stable major and Discord web build number so generated fingerprints stay current. The cron handler does not pass through the sieve.
 
