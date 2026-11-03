@@ -237,11 +237,9 @@ export interface AcquireSuccess {
   fingerprintProfileId: string;
 }
 
-export interface AcquireUnavailable {
-  ok: false;
-  reason: UnavailableReason;
-  retryAfter: number;
-}
+export type AcquireUnavailable =
+  | { ok: false; reason: Exclude<UnavailableReason, 'cooldown'>; retryAfter: number }
+  | { ok: false; reason: 'cooldown'; retryAfter: number; signal?: AbuseSignal };
 
 export type AcquireResult = AcquireSuccess | AcquireUnavailable;
 
@@ -394,6 +392,10 @@ export interface TokenPoolClient {
   acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
   acquireByLabel?(label: string, slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
   release(label: string, requestId: string, response: ReleaseInput): Promise<void>;
+  /** Read-only DO-wide edge-circuit check; no token, identity budget, or lease. */
+  checkUpstreamCircuit?(): Promise<IdentityBlock | null>;
+  /** Report only a Cloudflare edge outcome; never mutates identity or lease state. */
+  reportUpstreamOutcome?(outcome: ReleaseInput): Promise<void>;
   /**
    * Read-only identity peek: fingerprint for `kind` (kind-keyed, operator UX)
    * plus live versions (DO-wide) plus a circuit-only `block` for

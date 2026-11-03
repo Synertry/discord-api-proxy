@@ -18,14 +18,15 @@ Every user-token request, whether served by a pool token or the guarded static t
 
 ## Identity guard
 
-Static tokens are protected by the same per-bucket budget tracking the pool uses, plus abuse-signal circuits that are independent of ordinary bucket cooldowns:
+Static user tokens are protected by the same per-bucket budget tracking the pool uses, plus abuse-signal circuits that are independent of ordinary bucket cooldowns:
 
-- A captcha challenge in a response body opens a **30-minute** circuit on that identity.
-- A Cloudflare edge block opens a circuit on every identity at once, because they share one egress IP. It lasts for the edge response's `Retry-After` when that is a number of seconds, otherwise (absent or an HTTP date) for **10 minutes**.
-- A blocked request never reaches Discord; it gets a `429` with `X-Proxy-Block: bucket|capacity|captcha|cloudflare` instead (see [Configuration](configuration.md#responses-the-proxy-adds)).
-- The guard leases atomically immediately before each dispatch and settles immediately after, so concurrent requests on the same identity never oversubscribe its budget. Lease validation happens before any state change, so a forged lease id cannot touch another lease's budget or circuit.
+- A captcha challenge in a user-token response body opens a **30-minute** circuit on that identity. Captcha circuits and per-bucket budgets remain user-only.
+- A Cloudflare edge block from a user or bot response opens the shared Durable Object circuit for pool, static-user, and bot requests, because they share one egress IP. Its duration uses the edge response's numeric `Retry-After`, capped at **1 hour** by `MAX_UPSTREAM_CIRCUIT_MS`; absent or HTTP-date values default to **10 minutes**. A new block never shortens an already-open circuit.
+- A blocked request never reaches Discord; it gets a `429` with `X-Proxy-Block: bucket|capacity|captcha|cloudflare` instead (see [Configuration](configuration.md#responses-the-proxy-adds)). Pool cooldown holds carry `bucket`; pool captcha and Cloudflare circuit holds carry `captcha` or `cloudflare`. Actual Discord 429 responses are not relabeled as proxy holds.
+- The user-token guard leases atomically immediately before each dispatch and settles immediately after, so concurrent requests on the same identity never oversubscribe its budget. Lease validation happens before any state change, so a forged lease id cannot touch another lease's budget or circuit.
+- Bots check the shared Cloudflare circuit before fetching and inspect the response afterward, reporting only Cloudflare outcomes. They do not acquire pool tokens, reserve budgets, use captcha circuits, or create leases. The optional `TokenPoolClient` RPCs are `checkUpstreamCircuit(): Promise<IdentityBlock | null>` and `reportUpstreamOutcome(outcome: ReleaseInput): Promise<void>`.
 
-When no `TOKEN_POOL` binding is available, static tokens degrade to unguarded dispatch rather than erroring.
+When no `TOKEN_POOL` binding is available, static user tokens degrade to unguarded dispatch rather than erroring. Bot circuit handling also degrades to unguarded behavior when the binding or optional RPC methods are unavailable or a circuit RPC fails; a failed outcome report does not fail the already-dispatched response.
 
 ## Message sends
 

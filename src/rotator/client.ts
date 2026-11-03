@@ -24,6 +24,7 @@ import type { ClientVersionRecords } from '../fingerprint/versions';
 import type { Bindings } from '../types';
 import type {
   AcquireResult,
+  IdentityBlock,
   LeaseStaticResult,
   ReleaseInput,
   RouteKey,
@@ -70,6 +71,12 @@ export function createTokenPoolClient(stub: DurableObjectStub): TokenPoolClient 
     release(label: string, requestId: string, response: ReleaseInput): Promise<void> {
       return rpc.release(label, requestId, response);
     },
+    checkUpstreamCircuit(): Promise<IdentityBlock | null> {
+      return rpc.checkUpstreamCircuit();
+    },
+    reportUpstreamOutcome(outcome: ReleaseInput): Promise<void> {
+      return rpc.reportUpstreamOutcome(outcome);
+    },
     prepareStatic(identityHash: string, kind: StaticTokenKind): Promise<StaticPrepareResult> {
       return rpc.prepareStatic(identityHash, kind);
     },
@@ -94,6 +101,8 @@ interface RpcShape {
   acquire(slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
   acquireByLabel(label: string, slot: Slot, routeKey: RouteKey, guildId?: string): Promise<AcquireResult>;
   release(label: string, requestId: string, response: ReleaseInput): Promise<void>;
+  checkUpstreamCircuit(): Promise<IdentityBlock | null>;
+  reportUpstreamOutcome(outcome: ReleaseInput): Promise<void>;
   prepareStatic(identityHash: string, kind: StaticTokenKind): Promise<StaticPrepareResult>;
   leaseStatic(identityHash: string, routeKey: RouteKey): Promise<LeaseStaticResult>;
   settleStatic(identityHash: string, requestId: string, outcome: ReleaseInput): Promise<void>;

@@ -54,3 +54,27 @@ export function extractReleaseInput(response: Response, routeKey: RouteKey, guil
     guildId,
   };
 }
+
+/** Validate an RPC outcome before a lease-free upstream report can mutate shared state. */
+export function isReleaseInput(value: unknown): value is ReleaseInput {
+  if (typeof value !== 'object' || value === null) return false;
+  const input = value as Partial<ReleaseInput>;
+  return (
+    Number.isInteger(input.status) &&
+    input.status! >= 100 &&
+    input.status! <= 599 &&
+    typeof input.routeKey === 'string' &&
+    input.routeKey.length > 0 &&
+    (input.signal === undefined || input.signal === 'captcha' || input.signal === 'cloudflare') &&
+    (input.discordBucketHash === undefined || typeof input.discordBucketHash === 'string') &&
+    (input.guildId === undefined || typeof input.guildId === 'string') &&
+    optionalNonnegativeNumber(input.remaining) &&
+    optionalNonnegativeNumber(input.resetAfterMs) &&
+    optionalNonnegativeNumber(input.retryAfterMs) &&
+    (input.code === undefined || (Number.isInteger(input.code) && input.code >= 0))
+  );
+}
+
+function optionalNonnegativeNumber(value: unknown): boolean {
+  return value === undefined || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
+}

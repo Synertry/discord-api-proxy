@@ -15,6 +15,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { fetchAllMessages, DiscordApiError, IdentityBlockedError } from '../../../src/custom/shared/paged-messages';
 import type { PagerOptions, PagedMessage } from '../../../src/custom/shared/paged-messages';
+import type { IdentityBlock, ReleaseInput, TokenPoolClient } from '../../../src/rotator/types';
 
 const CHANNEL_ID = '1234567890123456789';
 
@@ -49,6 +50,22 @@ function baseOpts(
     maxMessages: 5000,
     pageLimit: 100,
     wait: vi.fn(async () => undefined),
+    ...overrides,
+  };
+}
+
+function botOpts(overrides: Partial<PagerOptions> = {}): PagerOptions {
+  return baseOpts({ headers: new Headers({ Authorization: 'Bot test-token' }), ...overrides });
+}
+
+function createBotClient(overrides: Partial<Pick<TokenPoolClient, 'checkUpstreamCircuit' | 'reportUpstreamOutcome'>> = {}) {
+  return {
+    acquire: vi.fn(async () => ({ ok: false as const, reason: 'empty-pool' as const, retryAfter: 0 })),
+    release: vi.fn(async () => undefined),
+    checkUpstreamCircuit: vi.fn(async (): Promise<IdentityBlock | null> => null),
+    reportUpstreamOutcome: vi.fn(async (_outcome: ReleaseInput) => undefined),
+    leaseStatic: vi.fn(async () => ({ ok: true as const, requestId: 'unused-bot-lease' })),
+    settleStatic: vi.fn(async () => undefined),
     ...overrides,
   };
 }
@@ -134,6 +151,248 @@ describe('fetchAllMessages: basic pagination', () => {
     await fetchAllMessages<TestMessage>(baseOpts({ fetcher: mockFetch as unknown as typeof fetch }));
     const init = mockFetch.mock.calls[0][1] as RequestInit;
     expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+describe('fetchAllMessages: bot upstream circuit', () => {
+  it('blocks an open bot circuit before fetching without waiting or leasing', async () => {
+    const block: IdentityBlock = { reason: 'circuit', retryAfter: 1000, signal: 'cloudflare' };
+    const client = createBotClient({ checkUpstreamCircuit: vi.fn(async () => block) });
+    const mockFetch = createMockFetch([[]]);
+    const wait = vi.fn(async () => undefined);
+    const opts = botOpts({
+      fetcher: mockFetch as unknown as typeof fetch,
+      tokenPoolClient: client,
+      guard: { lease: client.leaseStatic, settle: client.settleStatic },
+      wait,
+    });
+
+    await expect(fetchAllMessages<TestMessage>(opts)).rejects.toMatchObject({ name: 'IdentityBlockedError', block });
+    expect(client.checkUpstreamCircuit).toHaveBeenCalledTimes(1);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(wait).not.toHaveBeenCalled();
+    expect(client.leaseStatic).not.toHaveBeenCalled();
+    expect(client.settleStatic).not.toHaveBeenCalled();
+    expect(client.reportUpstreamOutcome).not.toHaveBeenCalled();
+  });
+
+  it('reports a bot Cloudflare response and blocks the next pager on the shared client circuit', async () => {
+    let circuit: IdentityBlock | null = null;
+    const body = '<html>Cloudflare challenge</html>';
+    const client = createBotClient({
+      checkUpstreamCircuit: vi.fn(async () => circuit),
+      reportUpstreamOutcome: vi.fn(async (outcome: ReleaseInput) => {
+        if (outcome.signal === 'cloudflare') circuit = { reason: 'circuit', retryAfter: 600_000, signal: 'cloudflare' };
+      }),
+    });
+    const mockFetch = vi.fn(async () => new Response(body, { status: 403, headers: { 'Content-Type': 'text/html' } }));
+    const opts = botOpts({ fetcher: mockFetch as unknown as typeof fetch, tokenPoolClient: client });
+
+    await expect(fetchAllMessages<TestMessage>(opts)).rejects.toMatchObject({ name: 'DiscordApiError', status: 403, body });
+    expect(client.reportUpstreamOutcome).toHaveBeenCalledTimes(1);
+    expect(client.reportUpstreamOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 403, signal: 'cloudflare', routeKey: `GET:/channels/${CHANNEL_ID}/messages` }),
+    );
+    await expect(fetchAllMessages<TestMessage>(opts)).rejects.toThrow(IdentityBlockedError);
+    expect(client.checkUpstreamCircuit).toHaveBeenCalledTimes(2);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(client.leaseStatic).not.toHaveBeenCalled();
+    expect(client.settleStatic).not.toHaveBeenCalled();
+  });
+
+  it.each(['Bot', 'bOt', 'BOT'])('checks a clean %s request once and bypasses supplied identity budgets', async (prefix) => {
+    const client = createBotClient();
+    const mockFetch = createMockFetch([generateMessages(1)]);
+    const result = await fetchAllMessages<TestMessage>(
+      botOpts({
+        headers: new Headers({ authorization: `${prefix} test-token` }),
+        fetcher: mockFetch as unknown as typeof fetch,
+        tokenPoolClient: client,
+        guard: { lease: client.leaseStatic, settle: client.settleStatic },
+      }),
+    );
+
+    expect(result).toEqual(generateMessages(1));
+    expect(client.checkUpstreamCircuit).toHaveBeenCalledTimes(1);
+    expect(client.checkUpstreamCircuit).toHaveBeenCalledWith();
+    expect(client.reportUpstreamOutcome).not.toHaveBeenCalled();
+    expect(client.acquire).not.toHaveBeenCalled();
+    expect(client.release).not.toHaveBeenCalled();
+    expect(client.leaseStatic).not.toHaveBeenCalled();
+    expect(client.settleStatic).not.toHaveBeenCalled();
+  });
+
+  it('checks immediately before every bot page while preserving page pacing', async () => {
+    const events: string[] = [];
+    const client = createBotClient({
+      checkUpstreamCircuit: vi.fn(async () => {
+        events.push('check');
+        return null;
+      }),
+    });
+    const pages = [generateMessages(100), []];
+    const mockFetch = vi.fn(async () => {
+      events.push('fetch');
+      return jsonPage(pages.shift()!);
+    });
+    const wait = vi.fn(async () => {
+      events.push('wait');
+    });
+
+    const result = await fetchAllMessages<TestMessage>(
+      botOpts({ fetcher: mockFetch as unknown as typeof fetch, tokenPoolClient: client, wait }),
+    );
+
+    expect(result).toHaveLength(100);
+    expect(events).toEqual(['check', 'fetch', 'wait', 'check', 'fetch']);
+    expect(client.reportUpstreamOutcome).not.toHaveBeenCalled();
+  });
+
+  it('checks again before a bot 429 retry and preserves the shared backoff', async () => {
+    const events: string[] = [];
+    const client = createBotClient({
+      checkUpstreamCircuit: vi.fn(async () => {
+        events.push('check');
+        return null;
+      }),
+    });
+    const mockFetch = vi.fn(async () => {
+      events.push('fetch');
+      return events.length === 2 ? new Response('Rate limited', { status: 429, headers: { 'Retry-After': '2' } }) : jsonPage([]);
+    });
+    const wait = vi.fn(async (ms: number) => {
+      events.push(`wait:${ms}`);
+    });
+
+    await expect(
+      fetchAllMessages<TestMessage>(botOpts({ fetcher: mockFetch as unknown as typeof fetch, tokenPoolClient: client, wait })),
+    ).resolves.toEqual([]);
+    expect(events).toEqual(['check', 'fetch', 'wait:3000', 'check', 'fetch']);
+    expect(client.reportUpstreamOutcome).not.toHaveBeenCalled();
+  });
+
+  it('dispatches bots without a client and bypasses any supplied static guard', async () => {
+    const client = createBotClient();
+    const mockFetch = createMockFetch([[]]);
+
+    await expect(
+      fetchAllMessages<TestMessage>(
+        botOpts({ fetcher: mockFetch as unknown as typeof fetch, guard: { lease: client.leaseStatic, settle: client.settleStatic } }),
+      ),
+    ).resolves.toEqual([]);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(client.leaseStatic).not.toHaveBeenCalled();
+    expect(client.settleStatic).not.toHaveBeenCalled();
+  });
+
+  it.each(['both', 'check', 'report'])('dispatches with legacy clients missing %s upstream methods', async (missing) => {
+    const client = createBotClient();
+    const legacyClient: TokenPoolClient = {
+      ...client,
+      checkUpstreamCircuit: missing === 'both' || missing === 'check' ? undefined : client.checkUpstreamCircuit,
+      reportUpstreamOutcome: missing === 'both' || missing === 'report' ? undefined : client.reportUpstreamOutcome,
+    };
+    const body = '<html>Cloudflare challenge</html>';
+    const mockFetch = vi.fn(async () => new Response(body, { status: 503, headers: { 'Content-Type': 'text/html' } }));
+
+    await expect(
+      fetchAllMessages<TestMessage>(botOpts({ fetcher: mockFetch as unknown as typeof fetch, tokenPoolClient: legacyClient })),
+    ).rejects.toMatchObject({ name: 'DiscordApiError', status: 503, body });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(client.checkUpstreamCircuit).not.toHaveBeenCalled();
+    expect(client.reportUpstreamOutcome).not.toHaveBeenCalled();
+  });
+
+  it.each([200, 403])('preserves a bot upstream %i response when the check RPC fails', async (status) => {
+    const client = createBotClient({
+      checkUpstreamCircuit: vi.fn(async () => {
+        throw new Error('check RPC failed');
+      }),
+    });
+    const body = status === 200 ? '[]' : 'Forbidden';
+    const mockFetch = vi.fn(async () => new Response(body, { status }));
+    const request = fetchAllMessages<TestMessage>(botOpts({ fetcher: mockFetch as unknown as typeof fetch, tokenPoolClient: client }));
+
+    if (status === 200) await expect(request).resolves.toEqual([]);
+    else await expect(request).rejects.toMatchObject({ name: 'DiscordApiError', status, body });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(client.reportUpstreamOutcome).not.toHaveBeenCalled();
+  });
+
+  it('preserves the bot Cloudflare status and body when the report RPC fails', async () => {
+    const client = createBotClient({
+      reportUpstreamOutcome: vi.fn(async (_outcome: ReleaseInput) => {
+        throw new Error('report RPC failed');
+      }),
+    });
+    const body = '<html>Cloudflare challenge</html>';
+    const mockFetch = vi.fn(async () => new Response(body, { status: 403, headers: { 'Content-Type': 'text/html' } }));
+
+    await expect(
+      fetchAllMessages<TestMessage>(botOpts({ fetcher: mockFetch as unknown as typeof fetch, tokenPoolClient: client })),
+    ).rejects.toMatchObject({ name: 'DiscordApiError', status: 403, body });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(client.reportUpstreamOutcome).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not report bot captcha responses or lease their identity', async () => {
+    const client = createBotClient();
+    const body = JSON.stringify({ captcha_key: ['captcha-required'], captcha_sitekey: 'test-sitekey' });
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(body, { status: 400, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(jsonPage([]));
+    const opts = botOpts({
+      fetcher: mockFetch as unknown as typeof fetch,
+      tokenPoolClient: client,
+      guard: { lease: client.leaseStatic, settle: client.settleStatic },
+    });
+
+    await expect(fetchAllMessages<TestMessage>(opts)).rejects.toMatchObject({ name: 'DiscordApiError', status: 400, body });
+    await expect(fetchAllMessages<TestMessage>(opts)).resolves.toEqual([]);
+    expect(client.checkUpstreamCircuit).toHaveBeenCalledTimes(2);
+    expect(client.reportUpstreamOutcome).not.toHaveBeenCalled();
+    expect(client.leaseStatic).not.toHaveBeenCalled();
+    expect(client.settleStatic).not.toHaveBeenCalled();
+  });
+
+  it('preserves bot network errors without reporting or settling an identity lease', async () => {
+    const client = createBotClient();
+    const mockFetch = vi.fn(async () => {
+      throw new Error('network down');
+    });
+
+    await expect(
+      fetchAllMessages<TestMessage>(
+        botOpts({
+          fetcher: mockFetch as unknown as typeof fetch,
+          tokenPoolClient: client,
+          guard: { lease: client.leaseStatic, settle: client.settleStatic },
+        }),
+      ),
+    ).rejects.toMatchObject({ name: 'DiscordApiError', status: 0, body: 'Network error: network down' });
+    expect(client.reportUpstreamOutcome).not.toHaveBeenCalled();
+    expect(client.leaseStatic).not.toHaveBeenCalled();
+    expect(client.settleStatic).not.toHaveBeenCalled();
+  });
+
+  it('keeps user-token paging on the static guard rather than the bot circuit RPCs', async () => {
+    const client = createBotClient();
+    const mockFetch = createMockFetch([[]]);
+
+    await expect(
+      fetchAllMessages<TestMessage>(
+        baseOpts({
+          fetcher: mockFetch as unknown as typeof fetch,
+          tokenPoolClient: client,
+          guard: { lease: client.leaseStatic, settle: client.settleStatic },
+        }),
+      ),
+    ).resolves.toEqual([]);
+    expect(client.checkUpstreamCircuit).not.toHaveBeenCalled();
+    expect(client.reportUpstreamOutcome).not.toHaveBeenCalled();
+    expect(client.leaseStatic).toHaveBeenCalledTimes(1);
+    expect(client.settleStatic).toHaveBeenCalledTimes(1);
   });
 });
 

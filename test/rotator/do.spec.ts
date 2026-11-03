@@ -14,8 +14,8 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
-import { makeTokenState, STATIC_GUARD_PREFIX, PENDING_LEASE_CAP, TOKEN_KEY_PREFIX } from '../../src/rotator/do';
-import { LEASE_TTL_MS } from '../../src/rotator/budget';
+import { makeTokenState, META_UPSTREAM_CIRCUIT_KEY, STATIC_GUARD_PREFIX, PENDING_LEASE_CAP, TOKEN_KEY_PREFIX } from '../../src/rotator/do';
+import { LEASE_TTL_MS, MAX_UPSTREAM_CIRCUIT_MS } from '../../src/rotator/budget';
 import type { TokenPoolDO } from '../../src/rotator/do';
 import type { ReleaseInput, StaticIdentityState, TokenState } from '../../src/rotator/types';
 
@@ -260,6 +260,18 @@ describe('TokenPoolDO.acquireByLabel', () => {
     }
   });
 
+  it('preserves the captcha signal when a released pinned token is cooling', async () => {
+    const stub = freshStub();
+    await stub.register({ label: 'captcha', slot: 'default', tokenSecret: VALID_TOKEN });
+    const acquired = await stub.acquireByLabel('captcha', 'default', ROUTE);
+    if (!acquired.ok) throw new Error('expected acquire to succeed');
+    await stub.release(acquired.label, acquired.requestId, { status: 400, routeKey: ROUTE, signal: 'captcha' });
+
+    const held = await stub.acquireByLabel('captcha', 'default', ROUTE);
+    expect(held).toMatchObject({ ok: false, reason: 'cooldown', signal: 'captcha' });
+    if (!held.ok) expect(held.retryAfter).toBeGreaterThan(29 * 60 * 1000);
+  });
+
   it('returns no-eligible-token when the guild is not in the whitelist', async () => {
     const stub = freshStub();
     await stub.register({
@@ -414,11 +426,7 @@ describe('TokenPoolDO.release', () => {
 
 describe('TokenPoolDO in-flight reconciliation against pruned leases', () => {
   /** Overwrite a registered token with abandoned (past `LEASE_TTL_MS`) leases plus an inflated in-flight count. */
-  async function seedAbandonedLease(
-    stub: DurableObjectStub<TokenPoolDO>,
-    label: string,
-    inFlightCount: number,
-  ): Promise<void> {
+  async function seedAbandonedLease(stub: DurableObjectStub<TokenPoolDO>, label: string, inFlightCount: number): Promise<void> {
     await runInDurableObject(stub, async (_instance, state) => {
       const key = `${TOKEN_KEY_PREFIX}${label}`;
       const token = await state.storage.get<TokenState>(key);
@@ -774,9 +782,7 @@ describe('TokenPoolDO static-identity guard: prepareStatic / leaseStatic / settl
       stub.settleStatic(HASH_A, lease.requestId, { status: 429, routeKey: ROUTE, retryAfterMs: 99999 }),
     ).resolves.toBeUndefined();
     // An unknown id against an EXISTING guard record: same story.
-    await expect(
-      stub.settleStatic(HASH_A, 'never-issued', { status: 429, routeKey: ROUTE, retryAfterMs: 99999 }),
-    ).resolves.toBeUndefined();
+    await expect(stub.settleStatic(HASH_A, 'never-issued', { status: 429, routeKey: ROUTE, retryAfterMs: 99999 })).resolves.toBeUndefined();
 
     await runInDurableObject(stub, async (_instance, state) => {
       const guard = await state.storage.get<StaticIdentityState>(`${STATIC_GUARD_PREFIX}${HASH_A}`);
@@ -803,6 +809,14 @@ describe('TokenPoolDO static-identity guard: prepareStatic / leaseStatic / settl
     await stub.register({ label: 'tok', slot: 'default', tokenSecret: VALID_TOKEN });
     const acq = await stub.acquire('default', ROUTE);
     expect(acq.ok).toBe(false);
+    if (!acq.ok) {
+      expect(acq.reason).toBe('cooldown');
+      if (acq.reason !== 'cooldown') throw new Error('expected Cloudflare cooldown');
+      expect(acq.signal).toBe('cloudflare');
+      expect(acq.retryAfter).toBeGreaterThan(9 * 60 * 1000);
+    }
+    const pinned = await stub.acquireByLabel('tok', 'default', ROUTE);
+    expect(pinned).toMatchObject({ ok: false, reason: 'cooldown', signal: 'cloudflare' });
   });
 
   it('rejects a new lease at PENDING_LEASE_CAP without evicting any still-outstanding lease', async () => {
@@ -922,6 +936,153 @@ describe('TokenPoolDO static-identity guard: prepareStatic / leaseStatic / settl
       const guard = await state.storage.get<{ leases: unknown[] }>(`${STATIC_GUARD_PREFIX}${HASH_A}`);
       expect(guard?.leases).toEqual([]);
     });
+  });
+});
+
+describe('TokenPoolDO upstream-only bot circuit RPCs', () => {
+  it('checkUpstreamCircuit returns null without creating state when no circuit exists', async () => {
+    const stub = freshStub();
+    await expect(stub.checkUpstreamCircuit()).resolves.toBeNull();
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.list()).toEqual(new Map());
+    });
+  });
+
+  it.each([true, false])('checkUpstreamCircuit is read-only for an open=%s stored circuit', async (open) => {
+    const stub = freshStub();
+    const now = Date.now();
+    const circuit = { signal: 'cloudflare' as const, openedAt: now - 60_000, until: now + (open ? 600_000 : -1) };
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put(META_UPSTREAM_CIRCUIT_KEY, circuit);
+    });
+    const before = await runInDurableObject(stub, async (_instance, state) => Array.from(await state.storage.list()));
+
+    const block = await stub.checkUpstreamCircuit();
+    if (open) {
+      expect(block).toMatchObject({ reason: 'cooldown', signal: 'cloudflare' });
+      expect(block?.retryAfter).toBeGreaterThan(590_000);
+      expect(block?.retryAfter).toBeLessThanOrEqual(600_000);
+    } else {
+      expect(block).toBeNull();
+    }
+    const after = await runInDurableObject(stub, async (_instance, state) => Array.from(await state.storage.list()));
+    expect(after).toEqual(before);
+  });
+
+  it('reportUpstreamOutcome opens only the upstream circuit and preserves token/static state and outstanding leases', async () => {
+    const stub = freshStub();
+    const hash = 'a'.repeat(64);
+    await stub.register({ label: 'tok', slot: 'default', tokenSecret: VALID_TOKEN });
+    const acquired = await stub.acquire('default', ROUTE);
+    const leased = await stub.leaseStatic(hash, ROUTE);
+    if (!acquired.ok || !leased.ok) throw new Error('expected outstanding pool and static leases');
+    await stub.setStaticFingerprint('user-default', { profileId: 'chrome-win-de' });
+    await runInDurableObject(stub, async (_instance, state) => {
+      const token = await state.storage.get<TokenState>(`${TOKEN_KEY_PREFIX}tok`);
+      const guard = await state.storage.get<StaticIdentityState>(`${STATIC_GUARD_PREFIX}${hash}`);
+      if (!token || !guard) throw new Error('expected stored identities');
+      const circuit = { signal: 'captcha' as const, openedAt: Date.now(), until: Date.now() + 1_800_000 };
+      token.circuit = circuit;
+      guard.circuit = circuit;
+      await state.storage.put(`${TOKEN_KEY_PREFIX}tok`, token);
+      await state.storage.put(`${STATIC_GUARD_PREFIX}${hash}`, guard);
+    });
+    const before = await runInDurableObject(stub, async (_instance, state) => Array.from(await state.storage.list()));
+    const reportedAt = Date.now();
+
+    await stub.reportUpstreamOutcome({
+      status: 429,
+      routeKey: ROUTE,
+      signal: 'cloudflare',
+      discordBucketHash: 'bot-only-bucket',
+      remaining: 0,
+      resetAfterMs: 5000,
+      retryAfterMs: 9000,
+      code: 50001,
+      guildId: GUILD_ID,
+    });
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      const after = await state.storage.list();
+      const circuit = after.get(META_UPSTREAM_CIRCUIT_KEY);
+      expect(circuit).toMatchObject({ signal: 'cloudflare' });
+      expect(circuit).toEqual(expect.objectContaining({ openedAt: expect.any(Number), until: expect.any(Number) }));
+      const typed = circuit as { openedAt: number; until: number };
+      expect(typed.openedAt).toBeGreaterThanOrEqual(reportedAt);
+      expect(typed.until - typed.openedAt).toBe(9000);
+      after.delete(META_UPSTREAM_CIRCUIT_KEY);
+      expect(Array.from(after)).toEqual(before);
+    });
+    expect(await stub.checkUpstreamCircuit()).toMatchObject({ reason: 'cooldown', signal: 'cloudflare' });
+  });
+
+  it('clamps a huge Cloudflare Retry-After to a one-hour upstream circuit', async () => {
+    const stub = freshStub();
+    await stub.reportUpstreamOutcome({ status: 403, routeKey: ROUTE, signal: 'cloudflare', retryAfterMs: Number.MAX_VALUE });
+    await runInDurableObject(stub, async (_instance, state) => {
+      const circuit = await state.storage.get<{ openedAt: number; until: number }>(META_UPSTREAM_CIRCUIT_KEY);
+      if (!circuit) throw new Error('expected upstream circuit');
+      expect(circuit.until - circuit.openedAt).toBe(MAX_UPSTREAM_CIRCUIT_MS);
+      expect(MAX_UPSTREAM_CIRCUIT_MS).toBe(60 * 60 * 1000);
+    });
+  });
+
+  it('does not shorten an open upstream circuit on a later smaller Cloudflare report', async () => {
+    const stub = freshStub();
+    await stub.reportUpstreamOutcome({ status: 403, routeKey: ROUTE, signal: 'cloudflare', retryAfterMs: 600_000 });
+    const before = await runInDurableObject(stub, async (_instance, state) => state.storage.get(META_UPSTREAM_CIRCUIT_KEY));
+    await stub.reportUpstreamOutcome({ status: 403, routeKey: ROUTE, signal: 'cloudflare', retryAfterMs: 1000 });
+    const after = await runInDurableObject(stub, async (_instance, state) => state.storage.get(META_UPSTREAM_CIRCUIT_KEY));
+    expect(after).toEqual(before);
+  });
+
+  it.each([
+    { status: 200, routeKey: ROUTE },
+    { status: 400, routeKey: ROUTE, signal: 'captcha' as const },
+  ])('reportUpstreamOutcome is a no-op for $status/$signal even with an expired upstream circuit', async (outcome) => {
+    const stub = freshStub();
+    await stub.register({ label: 'tok', slot: 'default', tokenSecret: VALID_TOKEN });
+    await stub.acquire('default', ROUTE);
+    await stub.leaseStatic('b'.repeat(64), ROUTE);
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put(META_UPSTREAM_CIRCUIT_KEY, { signal: 'cloudflare', openedAt: 1, until: 2 });
+    });
+    const before = await runInDurableObject(stub, async (_instance, state) => Array.from(await state.storage.list()));
+    await expect(stub.reportUpstreamOutcome(outcome)).resolves.toBeUndefined();
+    const after = await runInDurableObject(stub, async (_instance, state) => Array.from(await state.storage.list()));
+    expect(after).toEqual(before);
+  });
+
+  it.each([
+    undefined,
+    null,
+    { status: 403, signal: 'cloudflare' },
+    { status: 403, routeKey: '', signal: 'cloudflare' },
+    { status: 99, routeKey: ROUTE, signal: 'cloudflare' },
+    { status: 600, routeKey: ROUTE, signal: 'cloudflare' },
+    { status: 403.5, routeKey: ROUTE, signal: 'cloudflare' },
+    { status: NaN, routeKey: ROUTE, signal: 'cloudflare' },
+    { status: 403, routeKey: ROUTE, signal: 'cloudflare', retryAfterMs: NaN },
+    { status: 403, routeKey: ROUTE, signal: 'cloudflare', retryAfterMs: Infinity },
+    { status: 403, routeKey: ROUTE, signal: 'cloudflare', retryAfterMs: -1 },
+    { status: 403, routeKey: ROUTE, signal: 'cloudflare', resetAfterMs: -1 },
+    { status: 403, routeKey: ROUTE, signal: 'cloudflare', remaining: Infinity },
+    { status: 403, routeKey: ROUTE, signal: 'cloudflare', code: 50001.5 },
+    { status: 403, routeKey: ROUTE, signal: 'cloudflare', discordBucketHash: 1 },
+    { status: 403, routeKey: ROUTE, signal: 'cloudflare', guildId: 1 },
+    { status: 403, routeKey: ROUTE, signal: 'invalid' },
+  ])('reportUpstreamOutcome ignores malformed input without mutation: %j', async (outcome) => {
+    const stub = freshStub();
+    await stub.register({ label: 'tok', slot: 'default', tokenSecret: VALID_TOKEN });
+    await stub.acquire('default', ROUTE);
+    await stub.leaseStatic('c'.repeat(64), ROUTE);
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put(META_UPSTREAM_CIRCUIT_KEY, { signal: 'cloudflare', openedAt: 1, until: 2 });
+    });
+    const before = await runInDurableObject(stub, async (_instance, state) => Array.from(await state.storage.list()));
+    await expect(stub.reportUpstreamOutcome(outcome as ReleaseInput)).resolves.toBeUndefined();
+    const after = await runInDurableObject(stub, async (_instance, state) => Array.from(await state.storage.list()));
+    expect(after).toEqual(before);
   });
 });
 
